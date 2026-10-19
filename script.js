@@ -1,22 +1,22 @@
 // ==UserScript==
 // @name         WaniKani Media Context Sentences
 // @description  Formerly named "Wanikani Anime Sentences 2". Adds example sentences from anime, dramas, games, literature, and news for vocabulary from https://www.immersionkit.com.
-// @version      4.0.4
-// @author       Inserio
+// @version      2026-10-19
+// @author       Daring Cλlf
 // @namespace    https://greasyfork.org/en/users/11878
 // @match        https://www.wanikani.com/*
 // @match        https://preview.wanikani.com/*
 // @require      https://greasyfork.org/scripts/430565-wanikani-item-info-injector/code/WaniKani%20Item%20Info%20Injector.user.js?version=1951553
 // @copyright    2021+, Paul Connolly
 // @copyright    2024-2025, Brian Shenk
+// @copyright    2026, Inserio
 // @license      MIT; http://opensource.org/licenses/MIT
 // @run-at       document-body
 // @grant        none
-// @downloadURL https://update.greasyfork.org/scripts/495626/WaniKani%20Media%20Context%20Sentences.user.js
-// @updateURL https://update.greasyfork.org/scripts/495626/WaniKani%20Media%20Context%20Sentences.meta.js
 // ==/UserScript==
-/* jshint esversion: 11 */
-/* eslint-disable no-irregular-whitespace */
+/* jshint esversion: 11, curly: true */
+/* eslint curly: ["error", "all"] */
+
 // noinspection CssUnusedSymbol,CssInvalidPropertyValue,CssUnresolvedCustomProperty,JSUnusedGlobalSymbols,JSNonASCIINames
 /* global wkItemInfo */
 (() => {
@@ -26,14 +26,11 @@
       id: 'media-context-sentences',
       name: 'Media Context Sentences',
       secondarySortingKeyName: 'secondary',
-      version: '4.0.4',
+      version: '2026-10-19',
     };
   script.styleSheetName = `${script.id}-style`;
   script.regex = {
     anyUrl: new RegExp(), // default "empty" regex. Equivalent to `/(?:)/`
-    exampleLimitSearch: new RegExp(
-      `(#${script.id} \\.example:nth-child)(\\(n\\+\\d+\\))?`,
-    ), // /(#media-context-sentences \.example:nth-child)(\(n\+\d+\))?/
     maxHeightSearch: new RegExp(`(#${script.id}\\s*{[^}]*?max-height:).*?;`), // /(#media-context-sentences\s*{[^}]*?max-height:) *[\d.] *+\w*;/
     validCssUnit:
       /^((\d*\.)?\d+)((px)|(em)|(%)|(ex)|(ch)|(rem)|(vw)|(vh)|(vmin)|(vmax)|(cm)|(mm)|(in)|(pt)|(pc))$/i,
@@ -143,9 +140,10 @@
     handlers: {
       onPlay(button) {
         return ({ currentTarget: el }) => {
-          if (el == null) return;
+          if (el == null) {
+            return;
+          }
           const {
-            classNames: { audioIdle, audioPlaying },
             settings: {
               general: {
                 playback: { restartAudioOnPause },
@@ -153,19 +151,21 @@
             },
           } = state;
           for (const [key, { audio }] of Object.entries(state.elements.audio)) {
-            if (key !== button.id && !audio.paused) audio.pause();
-            if (restartAudioOnPause) audio.currentTime = 0;
+            if (key !== button.id && !audio.paused) {
+              audio.pause();
+            }
+            if (restartAudioOnPause) {
+              audio.currentTime = 0;
+            }
           }
-          button.classList.replace(audioIdle, audioPlaying);
-          button.textContent = '🔊';
         };
       },
       onStop(button) {
         return ({ currentTarget: el }) => {
-          if (el == null) return;
-          const { audioIdle, audioPlaying } = state.classNames;
-          button.classList.replace(audioPlaying, audioIdle);
-          button.textContent = '🔈';
+          if (el == null) {
+            return;
+          }
+          updateAudioButton(button, 'idle');
           el.remove();
         };
       },
@@ -192,12 +192,14 @@
                   },
                 ) {
                   keyword = keyword.replace('〜', ''); // for "counter" kanji
-                  if (exactSearch) keyword = `「${keyword}」`;
+                  if (exactSearch) {
+                    keyword = `「${keyword}」`;
+                  }
                   let sentenceSorting = '';
                   switch (primarySorting) {
                     case 'shortness':
                     case 'longness':
-                      sentenceSorting = `&sort=${sentenceSorting}`;
+                      sentenceSorting = `&sort=${primarySorting}`;
                   }
                   const jlpt =
                     Number(jlptLevel) > 0 ? `&jlpt=${jlptLevel}` : '';
@@ -254,6 +256,8 @@
         currentSearchUrl: null,
         cache: {
           key: `${script.id}.immersion-kit-data`,
+          // WKOF exempts this namespace from its automatic 14-day cleanup.
+          shardPrefix: `wkof.settings.${script.id}.immersion-kit-data.shard.`,
           // Cached so sentences can be re-rendered after settings change and to persist lookups between sessions
           urls: {},
         },
@@ -271,7 +275,9 @@
             waniKaniLevel = false,
           },
         } = {}) {
-          if (Array.isArray(tags)) tags = tags.join(',');
+          if (Array.isArray(tags)) {
+            tags = tags.join(',');
+          }
           return {
             exactSearch,
             exampleLimit,
@@ -541,12 +547,11 @@
         },
         // Immersion Kit Data Fetching Options
         dataFetching: {
-          // If greater than 0, will attempt to retry fetching results if none were found.
+          // Retry network/server failures, never successful empty results.
           retryCount: 0,
           // Milliseconds to wait before retrying fetch
           retryDelay: 5000,
-          // Whether to check the Last-Modified header to see if the data is still up to date or not.
-          // If a Last-Modified header is not present, the data is assumed to be out-of-date and will be re-fetched
+          // Retained for settings compatibility; permanent lookups are never revalidated.
           checkLastModified: false,
         },
         // Advanced Options
@@ -617,7 +622,7 @@
                     min: 0,
                     default: state.settings.general.appearance.exampleLimit,
                     hover_tip:
-                      'Limit the number of entries that may appear.\nSet to 0 to show as many as possible (note that this can really lag the list generation when there are a very large number of matches).',
+                      'Limit the number of entries that may appear.\nSet to 0 for unlimited results, loaded in batches of 20 using Load more sentences.',
                     on_change: onAppearanceOptionChanged,
                     path: '@general.appearance.exampleLimit',
                   },
@@ -700,7 +705,7 @@
                     min: 0,
                     default: state.settings.general.dataFetching.retryCount,
                     hover_tip:
-                      'Set how many times you would like to allow retrying the fetch for sentences (to workaround backend issues).',
+                      'Retry failed requests this many times. Successful empty results are cached permanently.',
                     on_change: onFetchOptionChanged,
                     path: '@general.dataFetching.retryCount',
                   },
@@ -721,7 +726,7 @@
                     default:
                       state.settings.general.dataFetching.checkLastModified,
                     hover_tip:
-                      'If true, will check the last modified date of the sentences before fetching.\nIf false, will always fetch the sentences.\n\nNote that as of the time of writing, Immersion Kit does not send a Last-Modified header, so checking this option will mean that the cache will always be ignored.',
+                      'Legacy option retained for compatibility. Cached sentences are now permanent and never revalidated. Use Flush to clear them manually.',
                     on_change: onFetchOptionChanged,
                     path: '@general.dataFetching.checkLastModified',
                   },
@@ -764,7 +769,7 @@
                     label: 'Cached Data',
                     text: 'Flush',
                     hover_tip:
-                      'Immediately flush all cached Immersion Kit data.',
+                      'Immediately delete all cached sentences, difficulty-filter lists, images, and audio. Browser storage is otherwise kept permanently.',
                     on_click: onFlushCachedDataClicked,
                   },
                 },
@@ -885,7 +890,7 @@
                   immersionKitSearchDescription: {
                     type: 'section',
                     label:
-                      'Changes here cause an API request unless already cached.',
+                      'v2 caches the full word lookup permanently. Exact Search is local; difficulty filters cache matching sentence IDs separately for each filter/level.',
                   },
                   filterExactSearch: {
                     type: 'checkbox',
@@ -958,16 +963,86 @@
     wkItemInfo: { enumerable: true, writable: false, configurable: false },
   });
 
-  Promise.resolve().then(async () => await init());
+  const inFlightRequests = new Map();
+  const legacyKeywordCache = new Map();
+  const mediaObjectUrls = new Map();
+  const mediaRequests = new Map();
+  const dirtyCacheShards = new Set();
+  const cacheShards = new Map();
+  let saveTimer, maxSaveTimer, savingCache;
+  let cacheGeneration = 0;
+  let activeLookups = 0;
+  let renderGeneration = 0;
+  let imageObserver;
+  const ikMediaCacheDB = {
+    connection: null,
+    open() {
+      if (!this.connection) {
+        this.connection = new Promise((resolve, reject) => {
+          const request = indexedDB.open(`${script.id}.media`, 1);
+          request.onupgradeneeded = () =>
+            request.result.createObjectStore('media', { keyPath: 'url' });
+          request.onsuccess = () => {
+            const db = request.result;
+            db.onversionchange = () => {
+              db.close();
+              this.connection = null;
+            };
+            resolve(db);
+          };
+          request.onerror = () => reject(request.error);
+          request.onblocked = () => reject(new Error('Media cache is blocked'));
+        }).catch((error) => {
+          this.connection = null;
+          throw error;
+        });
+      }
+      return this.connection;
+    },
+    async transact(mode, operation) {
+      const db = await this.open();
+      return new Promise((resolve, reject) => {
+        const transaction = db.transaction('media', mode);
+        const request = operation(transaction.objectStore('media'));
+        transaction.oncomplete = () => resolve(request.result);
+        transaction.onerror = transaction.onabort = () =>
+          reject(transaction.error || request.error);
+      });
+    },
+    get(url) {
+      return this.transact('readonly', (store) => store.get(url));
+    },
+    put(url, blob) {
+      return this.transact('readwrite', (store) =>
+        store.put({ url, blob, timestamp: Date.now() }),
+      );
+    },
+    clear() {
+      return this.transact('readwrite', (store) => store.clear());
+    },
+  };
+
+  Promise.resolve()
+    .then(init)
+    .catch((error) =>
+      console.error(`${script.name}: Initialization failed`, error),
+    );
   // END SCRIPT
 
   async function init() {
     updateKeyMapForTitles();
     await restoreCachedImmersionKitData();
-    const decksIndex = await fetchImmersionKitDecksIndex();
-    mergeImmersionKitDeckDataIntoContent(decksIndex);
+    addMissingEntriesToContent();
+    const api = state.immersionKit.api['2'];
+    const indexUrl = `${api.origin}${api.endpoints.index.pathname}`;
+    const decksIndex = state.immersionKit.cache.urls[indexUrl]?.data;
+    if (decksIndex) {
+      mergeImmersionKitDeckDataIntoContent(decksIndex);
+    } else {
+      void fetchImmersionKitDecksIndex();
+    }
     if (wkof) {
-      await wkof.include('Apiv2,Settings,Menu'); // Apiv2 needed in order to set wkof.user.level
+      await wkof.include('Apiv2,Settings,Menu');
       // document.documentElement.addEventListener('turbo:load', () => setTimeout(() => wkof.ready('Menu').then(installMenu), 0));
       await wkof.ready('Settings');
       // await createContentListsForSettings();
@@ -982,6 +1057,8 @@
         ),
       ]);
       await updateDesiredShows();
+      await wkof.ready('Menu');
+      installMenu();
       wkof.on_pageload(script.regex.anyUrl, () =>
         wkof.ready('Menu').then(installMenu),
       );
@@ -993,21 +1070,41 @@
     }
     window.mediaContextSentences = state;
     setWaniKaniItemInfoListener();
+    installActiveItemPrefetcher();
+    if (wkof) {
+      void startBackgroundPrewarmer().catch((error) =>
+        console.warn(`${script.name}: Background prewarming failed`, error),
+      );
+    }
+    const flush = () =>
+      void saveCachedImmersionKitData().catch((error) =>
+        console.warn(`${script.name}: Could not persist sentence cache`, error),
+      );
+    window.addEventListener('beforeunload', flush);
+    window.addEventListener('pagehide', flush);
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'hidden') {
+        flush();
+      }
+    });
   }
 
   function setWaniKaniItemInfoListener() {
-    if (state.wkItemInfo.handlers.vocabulary == null)
+    if (state.wkItemInfo.handlers.vocabulary == null) {
       state.wkItemInfo.handlers.vocabulary = wkItemInfo
         .forType('vocabulary,kanaVocabulary')
         .under('examples')
         .notify(onExamplesVisible);
+    }
     if (state.settings.general.appearance.showOnKanji) {
-      if (state.wkItemInfo.handlers.kanji == null)
+      if (state.wkItemInfo.handlers.kanji == null) {
         state.wkItemInfo.handlers.kanji = wkItemInfo
           .forType('kanji')
           .under('examples')
           .notify(onExamplesVisible);
-      else state.wkItemInfo.handlers.kanji.renew();
+      } else {
+        state.wkItemInfo.handlers.kanji.renew();
+      }
     } else {
       state.wkItemInfo.handlers.kanji?.remove();
       state.wkItemInfo.handlers.kanji = null;
@@ -1041,12 +1138,13 @@
 
     state.elements.base.append(state.elements.sentences);
 
-    if (state.wkItemInfo.item.injector)
+    if (state.wkItemInfo.item.injector) {
       state.wkItemInfo.item.injector.appendSubsection(
         header,
         state.elements.base,
         additionalSettings,
       );
+    }
 
     await renderSentences();
   }
@@ -1056,29 +1154,154 @@
     const api =
       immersionKit.api[state.settings.general.advanced.immersionKitAPIVersion];
     const options = immersionKit.getSearchOptions(settings);
+    if (api.version === 2) {
+      state.pending.updateSearchUrl = false;
+      return getLookupRequest(keyword, '2').url;
+    }
     const url = `${api.origin}${api.endpoints.query.pathname}${api.endpoints.query.getSearch(keyword, options)}`;
     state.pending.updateSearchUrl = false;
     return url;
   }
 
   async function restoreCachedImmersionKitData() {
-    if (state.immersionKit.cache.key in wkof.file_cache.dir)
-      state.immersionKit.cache.urls = await wkof.file_cache.load(
-        state.immersionKit.cache.key,
+    if (!wkof) {
+      return;
+    }
+    const { cache } = state.immersionKit;
+    try {
+      if (cache.key in wkof.file_cache.dir) {
+        const legacy = await wkof.file_cache.load(cache.key);
+        for (const [key, entry] of Object.entries(legacy)) {
+          setCachedData(key, entry);
+        }
+      }
+      await Promise.all(
+        Object.keys(wkof.file_cache.dir)
+          .filter((key) => key.startsWith(cache.shardPrefix))
+          .map(async (key) => {
+            const entries = await wkof.file_cache.load(key);
+            const shard = Number(key.slice(cache.shardPrefix.length));
+            cacheShards.set(shard, { ...cacheShards.get(shard), ...entries });
+            Object.assign(cache.urls, entries);
+            for (const [entryKey, entry] of Object.entries(entries)) {
+              indexLegacyCacheEntry(entryKey, entry);
+            }
+          }),
       );
+    } catch (error) {
+      console.warn(
+        `${script.name}: Could not restore all cached sentences`,
+        error,
+      );
+    }
   }
 
   async function deleteCachedImmersionKitData() {
-    if (state.immersionKit.cache.key in wkof.file_cache.dir)
-      await wkof.file_cache.delete(state.immersionKit.cache.key);
+    cacheGeneration++;
+    clearTimeout(saveTimer);
+    clearTimeout(maxSaveTimer);
+    maxSaveTimer = undefined;
+    dirtyCacheShards.clear();
+    if (savingCache) {
+      await savingCache;
+    }
+    if (wkof) {
+      const { cache } = state.immersionKit;
+      await Promise.all(
+        Object.keys(wkof.file_cache.dir)
+          .filter(
+            (key) => key === cache.key || key.startsWith(cache.shardPrefix),
+          )
+          .map((key) => wkof.file_cache.delete(key)),
+      );
+    }
     state.immersionKit.cache.urls = {};
+    cacheShards.clear();
+    legacyKeywordCache.clear();
+    inFlightRequests.clear();
+    mediaRequests.clear();
+    for (const url of mediaObjectUrls.values()) {
+      URL.revokeObjectURL(url);
+    }
+    mediaObjectUrls.clear();
+    try {
+      await ikMediaCacheDB.clear();
+    } catch (error) {
+      console.warn(`${script.name}: Could not clear media cache`, error);
+    }
+  }
+
+  function setCachedData(key, entry) {
+    state.immersionKit.cache.urls[key] = entry;
+    indexLegacyCacheEntry(key, entry);
+    let hash = 0;
+    for (let i = 0; i < key.length; i++) {
+      hash = (hash * 31 + key.charCodeAt(i)) | 0;
+    }
+    const shard = hash & 63;
+    if (!cacheShards.has(shard)) {
+      cacheShards.set(shard, {});
+    }
+    cacheShards.get(shard)[key] = entry;
+    dirtyCacheShards.add(shard);
+    scheduleSaveCachedData();
+  }
+
+  function indexLegacyCacheEntry(key, entry) {
+    if (!key.startsWith(`${state.immersionKit.api['2'].origin}/search?`)) {
+      return;
+    }
+    const keyword = new URL(key).searchParams.get('q');
+    if (keyword && entry?.data) {
+      legacyKeywordCache.set(keyword, entry);
+    }
+  }
+
+  function scheduleSaveCachedData() {
+    if (!wkof) {
+      return;
+    }
+    clearTimeout(saveTimer);
+    const flush = () =>
+      void saveCachedImmersionKitData().catch((error) =>
+        console.warn(`${script.name}: Could not persist sentence cache`, error),
+      );
+    saveTimer = setTimeout(flush, 2000);
+    if (maxSaveTimer === undefined) {
+      maxSaveTimer = setTimeout(flush, 10000);
+    }
   }
 
   async function saveCachedImmersionKitData() {
-    await wkof.file_cache.save(
-      state.immersionKit.cache.key,
-      state.immersionKit.cache.urls,
-    );
+    clearTimeout(saveTimer);
+    clearTimeout(maxSaveTimer);
+    maxSaveTimer = undefined;
+    if (!wkof) {
+      return;
+    }
+    if (savingCache) {
+      return savingCache;
+    }
+    savingCache = (async () => {
+      while (dirtyCacheShards.size > 0) {
+        const shard = dirtyCacheShards.values().next().value;
+        dirtyCacheShards.delete(shard);
+        try {
+          await wkof.file_cache.save(
+            `${state.immersionKit.cache.shardPrefix}${shard}`,
+            { ...cacheShards.get(shard) },
+          );
+        } catch (error) {
+          dirtyCacheShards.add(shard);
+          throw error;
+        }
+      }
+    })();
+    try {
+      await savingCache;
+    } finally {
+      savingCache = null;
+    }
   }
 
   function mergeImmersionKitDeckDataIntoContent(data) {
@@ -1106,11 +1329,12 @@
         });
       }
     }
-    if (errorList.length > 0)
+    if (errorList.length > 0) {
       console.warn(
         `Error(s) during mergeImmersionKitDeckDataIntoContent:`,
         errorList,
       );
+    }
   }
 
   // Temporary workaround for entries not listed in the index_meta list (likely only matters for API v1)
@@ -1118,13 +1342,17 @@
     const errorList = [];
     let currentCount = 0;
     for (const category of ['anime', 'drama', 'games', 'literature', 'news']) {
-      if (!(category in state.content)) state.content[category] = {};
+      if (!(category in state.content)) {
+        state.content[category] = {};
+      }
       if (
         Object.keys(state.content[category]).length <
         Object.keys(state.settings.filters.lists[category]).length
       ) {
         for (let title of Object.keys(state.settings.filters.lists[category])) {
-          if (title in state.content[category]) continue;
+          if (title in state.content[category]) {
+            continue;
+          }
           state.content[category][title] = title;
           state.content.allContent.set(title, {
             title,
@@ -1134,8 +1362,9 @@
           });
           errorList.push(title);
         }
-        if (errorList.length > currentCount)
+        if (errorList.length > currentCount) {
           sortObjectPropertiesInPlace(state.content[category]);
+        }
         currentCount = errorList.length;
       }
     }
@@ -1172,109 +1401,449 @@
   }
 
   async function fetchImmersionKitDecksIndex() {
-    try {
-      const api = state.immersionKit.api['2'];
-      const indexUrl = `${api.origin}${api.endpoints.index.pathname}`;
-      let prevModified = state.immersionKit.cache.urls[indexUrl]?.lastModified;
-      const response = prevModified
-        ? await fetch(indexUrl, {
-            headers: { 'If-Modified-Since': prevModified },
-          })
-        : await fetch(indexUrl);
-      if (response.status === 304)
-        return state.immersionKit.cache.urls[indexUrl].data; // Return cached data
-      const json = await response.json();
-      const data = json.data;
-      let lastModified =
-        response.headers.get('Last-Modified') || json.lastUpdatedTimestamp;
-      if (data != null) {
-        if (prevModified !== lastModified) await deleteCachedImmersionKitData();
-        for (let key of Object.keys(data).sort()) {
-          const value = data[key];
-          delete data[key];
-          data[key] = value;
+    const api = state.immersionKit.api['2'];
+    const indexUrl = `${api.origin}${api.endpoints.index.pathname}`;
+    const cached = state.immersionKit.cache.urls[indexUrl]?.data;
+    if (cached) {
+      return cached;
+    }
+    if (inFlightRequests.has(indexUrl)) {
+      return {};
+    }
+    const generation = cacheGeneration;
+    const request = (async () => {
+      try {
+        const response = await fetch(indexUrl);
+        if (!response.ok) {
+          throw new Error(`HTTP ${response.status}`);
+        }
+        const json = await response.json();
+        const data = json.data;
+        if (!data || typeof data !== 'object') {
+          throw new Error('Invalid Immersion Kit deck index');
+        }
+        if (generation === cacheGeneration) {
+          setCachedData(indexUrl, { data, cachedAt: Date.now() });
+          mergeImmersionKitDeckDataIntoContent(data);
+          addMissingEntriesToContent();
+          await updateDesiredShows();
+          state.pending.updateIndexUrl = false;
+        }
+        return data;
+      } catch (error) {
+        console.warn(
+          `${script.name}: Deck index unavailable; using built-in titles`,
+          error,
+        );
+        addMissingEntriesToContent();
+        return {};
+      } finally {
+        if (inFlightRequests.get(indexUrl) === request) {
+          inFlightRequests.delete(indexUrl);
         }
       }
-      state.immersionKit.cache.urls[indexUrl] = { data, lastModified };
-      state.pending.updateIndexUrl = false;
-      return data;
-    } catch (e) {
-      throw Error('Error fetching Immersion Kit deck list', { cause: e });
+    })();
+    inFlightRequests.set(indexUrl, request);
+    // The index enriches built-in titles but must never block Item Info.
+    return {};
+  }
+
+  function getLookupRequest(keyword, version) {
+    keyword = keyword.replace('〜', '');
+    const api = state.immersionKit.api[version];
+    if (String(version) === '2') {
+      return {
+        key: `v2:${keyword}`,
+        url: `${api.origin}/search?q=${encodeURIComponent(keyword)}`,
+      };
+    }
+    const options = state.immersionKit.getSearchOptions(state.settings);
+    const url = `${api.origin}${api.endpoints.query.pathname}${api.endpoints.query.getSearch(keyword, options)}`;
+    return { key: url, url };
+  }
+
+  function getCachedLookup(keyword, version) {
+    const { key, url } = getLookupRequest(keyword, version);
+    const { urls } = state.immersionKit.cache;
+    if (urls[key]?.data) {
+      return urls[key];
+    }
+    if (urls[url]?.data) {
+      return urls[url];
+    }
+    if (String(version) !== '2') {
+      return;
+    }
+    const api = state.immersionKit.api['2'];
+    const legacyUrl = `${api.origin}/search${api.endpoints.query.getSearch(
+      keyword,
+      state.immersionKit.getSearchOptions(state.settings),
+    )}`;
+    if (urls[legacyUrl]?.data) {
+      return urls[legacyUrl];
+    }
+    return legacyKeywordCache.get(keyword.replace('〜', ''));
+  }
+
+  async function requestImmersionKitJSON(url, version) {
+    const { retryCount, retryDelay } = state.settings.general.dataFetching;
+    for (let attempt = 0; ; attempt++) {
+      try {
+        state.immersionKit.fetchCount[url] =
+          (state.immersionKit.fetchCount[url] ?? 0) + 1;
+        const response = await fetch(url);
+        if (!response.ok) {
+          throw new Error(`HTTP ${response.status}`);
+        }
+        let data = await response.json();
+        if (String(version) === '1') {
+          data = data.data?.[0];
+        }
+        if (!Array.isArray(data?.examples)) {
+          throw new Error('Invalid Immersion Kit sentence response');
+        }
+        return data.examples.length === 0
+          ? { ...data, examples: [], deck_count: {} }
+          : data;
+      } catch (error) {
+        if (attempt >= Number(retryCount)) {
+          throw error;
+        }
+        console.warn(`${script.name}: Retrying failed lookup`, url, error);
+        await sleep(retryDelay);
+      }
     }
   }
 
-  async function fetchImmersionKitData() {
-    if (state.immersionKit.currentSearchUrl == null)
-      state.immersionKit.currentSearchUrl = getNewImmersionKitUrl(
-        state.wkItemInfo.item.characters,
-      );
-    const url1 = state.immersionKit.currentSearchUrl;
-    const url2 = getNewImmersionKitUrl(
-      state.wkItemInfo.item.characters,
-      Object.assign({}, state.settings, {
-        filters: { exactSearch: !state.settings.filters.exactSearch },
-      }),
-    );
-    let url = url1;
-
+  async function fetchImmersionKitData(
+    keyword = state.wkItemInfo.item.characters,
+    {
+      background = false,
+      version = state.settings.general.advanced.immersionKitAPIVersion,
+    } = {},
+  ) {
+    if (!background) {
+      activeLookups++;
+    }
     try {
-      for (;;) {
-        if (state.immersionKit.cache.urls[url1] != null) {
-          if (!state.settings.general.dataFetching.checkLastModified)
-            return state.immersionKit.cache.urls[url1].data;
-          const lastModified = state.immersionKit.cache.urls[url1].lastModified;
-          const response = await fetch(url1, {
-            headers: { 'If-Modified-Since': lastModified },
-          });
-          if (response.status === 304)
-            return state.immersionKit.cache.urls[url1].data; // Return cached data
-        } else if (
-          state.wkItemInfo.item.type === 'kanji' &&
-          state.immersionKit.fetchCount[url1] > 0 &&
-          state.immersionKit.cache.urls[url2] != null
-        ) {
-          if (!state.settings.general.dataFetching.checkLastModified)
-            return state.immersionKit.cache.urls[url2].data;
-          const lastModified = state.immersionKit.cache.urls[url2].lastModified;
-          const response = await fetch(url2, {
-            headers: { 'If-Modified-Since': lastModified },
-          });
-          if (response.status === 304)
-            return state.immersionKit.cache.urls[url2].data; // Return cached data
+      const cached = getCachedLookup(keyword, version);
+      if (cached) {
+        const { key } = getLookupRequest(keyword, version);
+        if (String(version) === '2' && !state.immersionKit.cache.urls[key]) {
+          setCachedData(key, cached);
         }
-        state.immersionKit.fetchCount[url] =
-          (state.immersionKit.fetchCount[url] ?? 0) + 1;
-        state.elements.sentences.textContent = 'Fetching...';
-        if (state.settings.general.advanced.debugging)
-          console.log(`Fetching Immersion Kit data from ${url}`);
-        const response = await fetch(url),
-          lastModified = response.headers.get('Last-Modified');
-        let data = await response.json();
-        if (state.settings.general.advanced.immersionKitAPIVersion === '1')
-          data = data.data[0];
-        if (data?.examples?.length > 0) {
-          state.immersionKit.cache.urls[url] = { data, lastModified };
-          await saveCachedImmersionKitData();
-          return data;
-        } else if (
-          state.wkItemInfo.item.type === 'kanji' &&
-          !state.immersionKit.fetchCount[url2]
-        ) {
-          url = url2;
-          continue;
-        } else if (
-          state.immersionKit.fetchCount[url] >
-          state.settings.general.dataFetching.retryCount
-        )
-          return data;
-        else url = url1;
-        const seconds =
-          Math.round(state.settings.general.dataFetching.retryDelay / 100) / 10; // round to nearest first decimal
-        state.elements.sentences.textContent = `Retrying in ${seconds} second${seconds !== 1 ? 's' : ''}`;
-        await sleep(state.settings.general.dataFetching.retryDelay);
+        return cached.data;
       }
-    } catch (e) {
-      throw Error('Error fetching Immersion Kit data', { cause: e });
+      const { key, url } = getLookupRequest(keyword, version);
+      if (inFlightRequests.has(key)) {
+        return await inFlightRequests.get(key);
+      }
+      const generation = cacheGeneration;
+      const request = requestImmersionKitJSON(url, version).then(
+        async (data) => {
+          if (
+            String(version) === '1' &&
+            data.examples.length === 0 &&
+            !background &&
+            state.wkItemInfo.item?.type === 'kanji'
+          ) {
+            const api = state.immersionKit.api['1'];
+            const options = state.immersionKit.getSearchOptions(state.settings);
+            options.exactSearch = !options.exactSearch;
+            const alternateUrl = `${api.origin}${api.endpoints.query.pathname}${api.endpoints.query.getSearch(keyword, options)}`;
+            data =
+              state.immersionKit.cache.urls[alternateUrl]?.data ||
+              (await requestImmersionKitJSON(alternateUrl, version));
+            if (generation === cacheGeneration) {
+              setCachedData(alternateUrl, { data, cachedAt: Date.now() });
+            }
+          }
+          if (generation === cacheGeneration) {
+            setCachedData(key, { data, cachedAt: Date.now() });
+          }
+          return data;
+        },
+      );
+      inFlightRequests.set(key, request);
+      try {
+        return await request;
+      } finally {
+        if (inFlightRequests.get(key) === request) {
+          inFlightRequests.delete(key);
+        }
+      }
+    } finally {
+      if (!background) {
+        activeLookups--;
+      }
+    }
+  }
+
+  async function getDifficultySentenceIds(keyword, data) {
+    const { jlptLevel, waniKaniLevel } = state.settings.filters;
+    if (
+      String(state.settings.general.advanced.immersionKitAPIVersion) !== '2' ||
+      (!Number(jlptLevel) && !waniKaniLevel) ||
+      data.examples.length === 0
+    ) {
+      return null;
+    }
+    const { key, url } = getLookupRequest(keyword, '2');
+    const suffix = `${Number(jlptLevel) || 0}:${waniKaniLevel ? state.userLevel : 0}`;
+    const filterKey = `${key}:difficulty:${suffix}`;
+    let ids = state.immersionKit.cache.urls[filterKey]?.data;
+    if (!ids) {
+      let request = inFlightRequests.get(filterKey);
+      if (!request) {
+        const generation = cacheGeneration;
+        const filteredUrl = `${url}${Number(jlptLevel) ? `&jlpt=${jlptLevel}` : ''}${waniKaniLevel ? `&wk=${state.userLevel}` : ''}`;
+        request = requestImmersionKitJSON(filteredUrl, '2').then((filtered) => {
+          const result = filtered.examples.map((example) => example.id);
+          if (generation === cacheGeneration) {
+            setCachedData(filterKey, { data: result, cachedAt: Date.now() });
+          }
+          return result;
+        });
+        inFlightRequests.set(filterKey, request);
+      }
+      activeLookups++;
+      try {
+        ids = await request;
+      } finally {
+        activeLookups--;
+        if (inFlightRequests.get(filterKey) === request) {
+          inFlightRequests.delete(filterKey);
+        }
+      }
+    }
+    return new Set(ids);
+  }
+
+  async function getMediaBlobUrl(remoteUrl) {
+    if (!remoteUrl) {
+      return remoteUrl;
+    }
+    if (mediaObjectUrls.has(remoteUrl)) {
+      return mediaObjectUrls.get(remoteUrl);
+    }
+    if (mediaRequests.has(remoteUrl)) {
+      return mediaRequests.get(remoteUrl);
+    }
+    const generation = cacheGeneration;
+    const request = (async () => {
+      let blob;
+      try {
+        blob = (await ikMediaCacheDB.get(remoteUrl))?.blob;
+      } catch (error) {
+        console.warn(`${script.name}: Could not read media cache`, error);
+      }
+      if (!blob) {
+        try {
+          const response = await fetch(remoteUrl, {
+            mode: 'cors',
+            credentials: 'omit',
+          });
+          if (!response.ok) {
+            throw new Error(`HTTP ${response.status}`);
+          }
+          blob = await response.blob();
+        } catch (error) {
+          console.warn(
+            `${script.name}: Using native media loading`,
+            remoteUrl,
+            error,
+          );
+          return remoteUrl;
+        }
+        if (generation === cacheGeneration) {
+          try {
+            await ikMediaCacheDB.put(remoteUrl, blob);
+          } catch (error) {
+            console.warn(`${script.name}: Could not persist media`, error);
+          }
+        }
+      }
+      if (generation !== cacheGeneration) {
+        return remoteUrl;
+      }
+      const objectUrl = URL.createObjectURL(blob);
+      mediaObjectUrls.set(remoteUrl, objectUrl);
+      return objectUrl;
+    })();
+    mediaRequests.set(remoteUrl, request);
+    try {
+      return await request;
+    } finally {
+      if (mediaRequests.get(remoteUrl) === request) {
+        mediaRequests.delete(remoteUrl);
+      }
+    }
+  }
+
+  function prepareExample(rawExample, keyword, difficultyIds = null) {
+    if (difficultyIds && !difficultyIds.has(rawExample.id)) {
+      return null;
+    }
+    const example = { ...rawExample };
+    const { title } = getItemInfo(example);
+    const entry = state.content.allContent.get(title);
+    if (!entry?.enabled) {
+      return null;
+    }
+    keyword = keyword.replace('〜', '');
+    const { filters } = state.settings;
+    if (filters.exactMatch && !example.sentence.includes(keyword)) {
+      return null;
+    }
+    if (
+      String(state.settings.general.advanced.immersionKitAPIVersion) === '2' &&
+      filters.exactSearch &&
+      !example.word_list.includes(keyword)
+    ) {
+      return null;
+    }
+    example.category = entry.category;
+    const baseUrl = `${state.immersionKit.baseContentUrl}${entry.category}/${entry.title}/media/`;
+    if (!example.image_url && example.image) {
+      example.image_url = `${baseUrl}${example.image}`;
+    }
+    if (!example.sound_url && example.sound) {
+      example.sound_url = `${baseUrl}${example.sound}`;
+    }
+    return example;
+  }
+
+  async function prefetchItem(keyword) {
+    if (!keyword) {
+      return;
+    }
+    const version = state.settings.general.advanced.immersionKitAPIVersion;
+    const data = await fetchImmersionKitData(keyword);
+    const ids = await getDifficultySentenceIds(keyword, data);
+    if (version !== state.settings.general.advanced.immersionKitAPIVersion) {
+      return;
+    }
+    const examples = data.examples
+      .map((example) => prepareExample(example, keyword, ids))
+      .filter(Boolean);
+    examples.sort((a, b) => a.sentence.length - b.sentence.length);
+    await Promise.all(
+      examples.slice(0, 2).map((example) => getMediaBlobUrl(example.sound_url)),
+    );
+  }
+
+  function installActiveItemPrefetcher() {
+    let lastKeyword = '';
+    const prefetch = (keyword) => {
+      if (!keyword || keyword === lastKeyword) {
+        return;
+      }
+      lastKeyword = keyword;
+      void prefetchItem(keyword).catch((error) => {
+        if (lastKeyword === keyword) {
+          lastKeyword = '';
+        }
+        console.warn(`${script.name}: Active item prefetch failed`, error);
+      });
+    };
+    window.addEventListener(
+      'willShowNextQuestion',
+      (event) => {
+        const subject = event.detail?.subject;
+        const type =
+          subject?.type || subject?.object || event.detail?.subjectType;
+        if (
+          [
+            'Vocabulary',
+            'KanaVocabulary',
+            'Kanji',
+            'vocabulary',
+            'kanaVocabulary',
+            'kana_vocabulary',
+            'kanji',
+          ].includes(type)
+        ) {
+          prefetch(subject.characters || subject.data?.characters);
+        }
+      },
+      true,
+    );
+    let headerObserver;
+    const attach = () => {
+      headerObserver?.disconnect();
+      const header = document.querySelector('.character-header__characters');
+      if (!header) {
+        return;
+      }
+      const read = () => {
+        const container = header.closest('[data-subject-type]');
+        const type = container?.dataset.subjectType;
+        const radical =
+          type?.toLowerCase() === 'radical' ||
+          header.closest('.character-header--radical');
+        if (!radical) {
+          prefetch(header.textContent.trim());
+        }
+      };
+      headerObserver = new MutationObserver(read);
+      headerObserver.observe(header, {
+        childList: true,
+        characterData: true,
+        subtree: true,
+      });
+      read();
+    };
+    attach();
+    document.addEventListener('turbo:load', attach);
+    // The review app can mount its header after turbo:load.
+    const mountObserver = new MutationObserver(() => {
+      if (currentHeader?.isConnected) {
+        return;
+      }
+      const header = document.querySelector('.character-header__characters');
+      if (header !== currentHeader) {
+        currentHeader = header;
+        attach();
+      }
+    });
+    let currentHeader = document.querySelector('.character-header__characters');
+    mountObserver.observe(document.body, { childList: true, subtree: true });
+  }
+
+  async function startBackgroundPrewarmer() {
+    await wkof.include('ItemData');
+    await wkof.ready('Apiv2,ItemData');
+    const items = await wkof.ItemData.get_items('assignments');
+    for (const item of items) {
+      if (!['vocabulary', 'kana_vocabulary'].includes(item.object)) {
+        continue;
+      }
+      const assignment = item.assignments;
+      const relevant =
+        item.data.level === state.userLevel ||
+        (assignment?.unlocked_at && assignment.srs_stage <= 6);
+      if (!relevant || !item.data.characters) {
+        continue;
+      }
+      const version = state.settings.general.advanced.immersionKitAPIVersion;
+      if (getCachedLookup(item.data.characters, version)) {
+        continue;
+      }
+      await sleep(1500);
+      while (activeLookups > 0) {
+        await sleep(250);
+      }
+      try {
+        await fetchImmersionKitData(item.data.characters, {
+          background: true,
+          version,
+        });
+      } catch (error) {
+        console.warn(
+          `${script.name}: Could not prewarm ${item.data.characters}`,
+          error,
+        );
+      }
     }
   }
 
@@ -1301,7 +1870,9 @@
       a.furiganaObject.getFirstKeywordIndex() -
       b.furiganaObject.getFirstKeywordIndex();
     const sort = (primaryOrder, a, b) => {
-      if (primaryOrder !== 0) return primaryOrder;
+      if (primaryOrder !== 0) {
+        return primaryOrder;
+      }
       switch (secondarySorting) {
         case primarySorting:
           return primaryOrder;
@@ -1415,12 +1986,14 @@
     const keywordSet = new Set(); // use a set to prevent duplicates from being added.
     switch (state.settings.general.advanced.immersionKitAPIVersion) {
       case '1':
-        for (let i = 0; i < item.word_index.length; i++)
+        for (let i = 0; i < item.word_index.length; i++) {
           keywordSet.add(item.word_list[item.word_index[i]]);
+        }
         break;
       case '2':
-        for (let i = 0; i < item.matched_indexes.length; i++)
+        for (let i = 0; i < item.matched_indexes.length; i++) {
           keywordSet.add(item.word_list[item.matched_indexes[i].index]);
+        }
         break;
     }
     const sentenceKeywords = Array.from(keywordSet);
@@ -1438,27 +2011,48 @@
   // Called from Immersion Kit response and on settings save.
   // This function starts by calling fetchImmersionKitData() to get the data.
   async function renderSentences() {
-    const data = await fetchImmersionKitData();
-    const { content, elements, immersionKit, settings, wkItemInfo } = state;
+    const generation = ++renderGeneration;
+    const keyword = state.wkItemInfo.item.characters;
+    let data, difficultyIds;
+    try {
+      data = await fetchImmersionKitData(keyword);
+      difficultyIds = await getDifficultySentenceIds(keyword, data);
+    } catch (error) {
+      console.warn(`${script.name}: Could not load sentences`, error);
+      if (generation === renderGeneration) {
+        state.elements.sentences.textContent =
+          'Error fetching examples from Immersion Kit.';
+      }
+      return;
+    }
+    if (generation !== renderGeneration) {
+      return;
+    }
+    const { content, elements, settings } = state;
+    const { debugging, failWhenHidden } = settings.general.advanced;
+    imageObserver?.disconnect();
+    imageObserver = null;
     Object.values(elements.audio).forEach((el) => {
       el.audio.remove();
       el = null;
     });
     elements.audio = {};
-    if (data == null)
+    if (data == null) {
       return (elements.sentences.textContent =
         'Error fetching examples from Immersion Kit.');
+    }
     const exampleCount = data.examples?.length ?? 0;
-    if (exampleCount === 0)
-      return (elements.sentences.textContent = `${settings.retryCount > 0 ? 'Retry limit reached. ' : ''}No sentences found.`);
+    if (exampleCount === 0) {
+      return (elements.sentences.textContent = 'No sentences found.');
+    }
     elements.sentences.textContent = 'Loading...';
     const debugList = new Map();
     const errorList = [];
-    const sentencesToDisplay = [];
+    let sentencesToDisplay = [];
     // Exclude non-selected titles
     for (let i = 0; i < exampleCount; i++) {
-      const example = data.examples[i];
-      const { title } = getItemInfo(example);
+      const rawExample = data.examples[i];
+      const { title } = getItemInfo({ ...rawExample });
       if (!title || !content.allContent.has(title)) {
         const error = !title
           ? 'No title'
@@ -1466,22 +2060,25 @@
         errorList.push({
           error,
           index: `${i + 1} of ${exampleCount}:`,
-          example,
+          example: rawExample,
         });
         continue;
       }
       const matchingEntry = content.allContent.get(title);
       const enabled = matchingEntry?.enabled ?? false;
       if (!enabled) {
-        if (settings.debugging)
+        if (debugging || failWhenHidden) {
           debugList.set(title, (debugList.get(title) ?? 0) + 1);
+        }
         continue;
       }
-      example.category = matchingEntry.category;
-      const baseUrl = `${immersionKit.baseContentUrl}${matchingEntry.category}/${matchingEntry.title}/media/`;
-      // Normalize or create image and sound URLs
-      example.image_url = example.image_url || `${baseUrl}${example.image}`;
-      example.sound_url = example.sound_url || `${baseUrl}${example.sound}`;
+      const example = prepareExample(rawExample, keyword, difficultyIds);
+      if (!example) {
+        if (debugging || failWhenHidden) {
+          debugList.set(title, (debugList.get(title) ?? 0) + 1);
+        }
+        continue;
+      }
       // Strip directional formatting and other non-displaying characters from sentences (...how they got there in the first place, who knows...)
       const directionalFormattingCharsRegex =
         /[\u202A-\u202E\u2066-\u2069\uE4C6]/g;
@@ -1497,37 +2094,30 @@
         example.sentence,
         example.sentence_with_furigana,
       );
-      const itemKeyword = wkItemInfo.item.characters.replace('〜', '');
-      if (
-        settings.filters.exactMatch &&
-        !example.sentence.includes(itemKeyword)
-      ) {
-        if (settings.debugging)
-          debugList.set(title, (debugList.get(title) ?? 0) + 1);
-        // if (settings.debugging) console.log(`Excluded: Title="${title}"; ExactMatch=true`);
-        continue;
-      }
-      setKeywordRegexForItem(example, itemKeyword);
+      setKeywordRegexForItem(example, keyword.replace('〜', ''));
       sentencesToDisplay.push(example);
     }
-    if (errorList.length > 0)
+    if (errorList.length > 0) {
       console.warn(`Error(s) found while rendering sentences:`, errorList);
-    if (settings.debugging && debugList.size > 0)
+    }
+    if (debugging && debugList.size > 0) {
       console.log('Currently hidden titles:', debugList);
+    }
     if (
       sentencesToDisplay.length === 0 ||
-      (settings.failWhenHidden && debugList.size > 0)
+      (failWhenHidden && debugList.size > 0)
     ) {
       const deckCountsAsJson = JSON.stringify(data.deck_count, undefined, '\t');
       const preElement = Object.assign(document.createElement('pre'), {
         innerHTML: `${sentencesToDisplay.length > 0 ? sentencesToDisplay.length : 'No'} sentences found for the selected filters (${exampleCount - sentencesToDisplay.length} are available but hidden; see below for details and entry counts).`,
       });
-      if (settings.failWhenHidden)
+      if (failWhenHidden) {
         preElement.innerHTML += `<br><br>Currently hidden titles: {<br>\t${Array.from(
           debugList,
         )
           .map(([title, count]) => `"${title}": ${count}`)
           .join('<br>\t')}<br>}<br>`;
+      }
       preElement.innerHTML += `<br>Complete deck count data: ${deckCountsAsJson}`;
       elements.sentences.replaceChildren(preElement);
       return;
@@ -1539,13 +2129,80 @@
       settings.sorting.primary,
       settings.sorting[script.secondarySortingKeyName],
     );
+    const exampleLimit = Number(settings.general.appearance.exampleLimit);
+    const remainingSentences =
+      exampleLimit === 0 ? sentencesToDisplay.slice(20) : [];
+    sentencesToDisplay = sentencesToDisplay.slice(
+      0,
+      exampleLimit > 0 ? exampleLimit : 20,
+    );
+    if (typeof IntersectionObserver !== 'undefined') {
+      const observer = new IntersectionObserver(
+        (entries) => {
+          for (const { target, isIntersecting } of entries) {
+            if (!isIntersecting) {
+              continue;
+            }
+            observer.unobserve(target);
+            void loadExampleImage(target);
+          }
+        },
+        { root: elements.sentences },
+      );
+      imageObserver = observer;
+    }
     for (let i = 0; i < sentencesToDisplay.length; i++) {
       const example = sentencesToDisplay[i];
       const exampleElement = await createExampleElement(example);
       fragment.appendChild(exampleElement);
     }
+    if (generation !== renderGeneration) {
+      return;
+    }
     elements.sentences.replaceChildren(fragment);
+    if (remainingSentences.length > 0) {
+      const moreButton = Object.assign(document.createElement('button'), {
+        type: 'button',
+        textContent: 'Load more sentences',
+      });
+      moreButton.addEventListener('click', async () => {
+        moreButton.disabled = true;
+        const batch = document.createDocumentFragment();
+        for (const example of remainingSentences.splice(0, 20)) {
+          batch.appendChild(await createExampleElement(example));
+        }
+        if (generation !== renderGeneration) {
+          return;
+        }
+        moreButton.before(batch);
+        moreButton.disabled = false;
+        if (remainingSentences.length === 0) {
+          moreButton.remove();
+        }
+      });
+      elements.sentences.append(moreButton);
+    }
     state.pending.renderSentences = false;
+  }
+
+  async function loadExampleImage(imgEl) {
+    const remoteUrl = imgEl.dataset.mediaUrl;
+    if (!remoteUrl) {
+      return;
+    }
+    const url = await getMediaBlobUrl(remoteUrl);
+    if (!imgEl.isConnected) {
+      return;
+    }
+    imgEl.onerror = () => {
+      imgEl.onerror = null;
+      if (url !== remoteUrl) {
+        imgEl.src = remoteUrl;
+      } else {
+        console.warn(`${script.name}: Image could not be loaded`, remoteUrl);
+      }
+    };
+    imgEl.src = url;
   }
 
   async function createExampleElement(example) {
@@ -1554,8 +2211,8 @@
         className: 'example',
       }),
       imgEl = Object.assign(document.createElement('img'), {
-        src: example.image_url ?? '',
-        decoding: 'auto',
+        loading: 'lazy',
+        decoding: 'async',
         alt: '',
       }),
       textParentEl = Object.assign(document.createElement('div'), {
@@ -1617,8 +2274,9 @@
       ],
       promises = [];
     for (const { element, classListUpdates, clickListener } of elements) {
-      for (const { name, value } of classListUpdates)
+      for (const { name, value } of classListUpdates) {
         promises.push(updateClassListForSpanElement(element, name, value));
+      }
       const { name, value } = clickListener;
       promises.push(updateOnClickListenerForSpanElement(element, name, value));
     }
@@ -1636,6 +2294,14 @@
     textParentEl.append(enEl);
 
     parentEl.append(textParentEl);
+    if (example.image_url) {
+      imgEl.dataset.mediaUrl = example.image_url;
+      if (imageObserver) {
+        imageObserver.observe(imgEl);
+      } else {
+        setTimeout(() => void loadExampleImage(imgEl), 0);
+      }
+    }
     return parentEl;
   }
 
@@ -1659,7 +2325,9 @@
   }
 
   function sortObjectPropertiesInPlace(obj) {
-    if (typeof obj !== 'object') return;
+    if (typeof obj !== 'object') {
+      return;
+    }
     Object.keys(obj)
       .sort()
       .forEach(function (key) {
@@ -1690,25 +2358,51 @@
     for (let idx = 0; idx < len; idx++) {
       const v1 = currentVer[idx] || 0;
       const v2 = otherVer[idx] || 0;
-      if (v1 !== v2) return v1 - v2;
+      if (v1 !== v2) {
+        return v1 - v2;
+      }
     }
     return 0;
   }
   function arrayValuesEqual(a, b) {
-    if (a === b) return true;
-    if (a == null || b == null) return false;
+    if (a === b) {
+      return true;
+    }
+    if (a == null || b == null) {
+      return false;
+    }
     let aValues = Object.values(a),
       bValues = Object.values(b);
-    if (aValues.length !== bValues.length) return false;
+    if (aValues.length !== bValues.length) {
+      return false;
+    }
     for (let i = 0; i < aValues.length; ++i) {
-      if (aValues[i] !== bValues[i]) return false;
+      if (aValues[i] !== bValues[i]) {
+        return false;
+      }
     }
     return true;
   }
 
   // ----------------------------------------------ELEMENT MANIPULATION---------------------------------------------- //
 
+  function updateAudioButton(button, status) {
+    const { audioIdle, audioPlaying } = state.classNames;
+    const loading = status === 'loading';
+    button.classList.toggle(audioIdle, status === 'idle');
+    button.classList.toggle(audioPlaying, status === 'playing');
+    button.textContent = loading ? '⏳' : status === 'playing' ? '🔊' : '🔈';
+    button.title = loading
+      ? 'Loading audio…'
+      : status === 'playing'
+        ? 'Pause Audio'
+        : 'Play Audio';
+    button.ariaLabel = button.title;
+    button.ariaBusy = String(loading);
+  }
+
   function configureAudioElement(element, example) {
+    let loading = false;
     element.addEventListener(
       'click',
       async function (e) {
@@ -1718,24 +2412,61 @@
           handlers,
           settings,
         } = state;
-        const { audio } = (audioEls[element.id] = audioEls[element.id] || {
-          button: element,
-          audio: Object.assign(document.createElement('audio'), {
-            src: example.sound_url,
-            playbackRate: (settings.general.playback.playbackRate * 2) / 100,
-            volume: settings.general.playback.playbackVolume / 100,
-            onplay: handlers.onPlay(element),
-            onpause: handlers.onStop(element),
-            onended: handlers.onStop(element),
-            onabort: handlers.onStop(element),
-          }),
-        });
-        if (!audio.paused) {
-          audio.pause();
+        if (loading) {
           return;
         }
-        base.append(audio);
-        await audio.play()?.catch(() => {});
+        loading = true;
+        updateAudioButton(element, 'loading');
+        try {
+          let source;
+          if (!audioEls[element.id]) {
+            source = await getMediaBlobUrl(example.sound_url);
+          }
+          if (!element.isConnected || base !== state.elements.base) {
+            return;
+          }
+          const { audio } = (audioEls[element.id] = audioEls[element.id] || {
+            button: element,
+            audio: Object.assign(document.createElement('audio'), {
+              src: source,
+              playbackRate: (settings.general.playback.playbackRate * 2) / 100,
+              volume: settings.general.playback.playbackVolume / 100,
+              onplay: handlers.onPlay(element),
+              onplaying: () => updateAudioButton(element, 'playing'),
+              onwaiting: () => updateAudioButton(element, 'loading'),
+              onpause: handlers.onStop(element),
+              onended: handlers.onStop(element),
+              onabort: handlers.onStop(element),
+            }),
+          });
+          audio.onerror = () => {
+            if (audio.src !== example.sound_url) {
+              updateAudioButton(element, 'loading');
+              audio.src = example.sound_url;
+              void audio.play().catch((error) => {
+                updateAudioButton(element, 'idle');
+                console.warn(`${script.name}: Audio playback failed`, error);
+              });
+            } else {
+              updateAudioButton(element, 'idle');
+              console.warn(
+                `${script.name}: Audio could not be loaded`,
+                example.sound_url,
+              );
+            }
+          };
+          if (!audio.paused) {
+            audio.pause();
+            return;
+          }
+          base.append(audio);
+          await audio.play();
+        } catch (error) {
+          updateAudioButton(element, 'idle');
+          console.warn(`${script.name}: Audio playback failed`, error);
+        } finally {
+          loading = false;
+        }
       },
       { passive: true },
     );
@@ -1766,7 +2497,9 @@
       case 'always':
       case 'onhover':
       case 'never':
-        if (name !== 'showFurigana') removeOnClickEventListener(element);
+        if (name !== 'showFurigana') {
+          removeOnClickEventListener(element);
+        }
         break;
       case 'onclick':
         attachShowOnClickEventListener(element);
@@ -1777,7 +2510,9 @@
   }
 
   function onAudioElementClick(event) {
-    if (event.target.classList.contains('show-on-click')) return;
+    if (event.target.classList.contains('show-on-click')) {
+      return;
+    }
     const button = event.currentTarget.getElementsByClassName(
       state.classNames.audioButton,
     )[0];
@@ -1834,19 +2569,24 @@
     return Object.assign(state.settings, window.structuredClone(settings));
   }
 
-  // Deletes settings when the current version is older than the last major update
+  // Deletes pre-4.0.0 settings; date-versioned releases already use the newer format.
   async function migrateSettingsVersion() {
     const majorUpdateVersion = '4.0.0';
-    if (compareVersions(state.settings.version, majorUpdateVersion) >= 0)
+    if (
+      /^\d{4}-\d{2}-\d{2}$/.test(state.settings.version) ||
+      compareVersions(state.settings.version, majorUpdateVersion) >= 0
+    ) {
       return;
-    if (state.settings.general.advanced.debugging)
+    }
+    if (state.settings.general.advanced.debugging) {
       console.log(
         `Migrating settings from ${state.settings.version} to ${majorUpdateVersion}`,
       );
+    }
     const settingsKey = `wkof.settings.${script.id}`;
-    if (settingsKey in wkof.file_cache.dir)
+    if (settingsKey in wkof.file_cache.dir) {
       await wkof.file_cache.delete(settingsKey);
-    await deleteCachedImmersionKitData();
+    }
     await loadSettings();
     wkof.settings[script.id].version = script.version;
     try {
@@ -1980,14 +2720,23 @@
       pending.renderSentences = true;
     }
 
-    if (pending.updateIndexUrl) await fetchImmersionKitDecksIndex();
-    if (pending.updateSearchUrl)
+    if (pending.updateIndexUrl) {
+      await fetchImmersionKitDecksIndex();
+    }
+    if (pending.updateSearchUrl && state.wkItemInfo.item) {
       state.immersionKit.currentSearchUrl = getNewImmersionKitUrl(
         state.wkItemInfo.item.characters,
         updatedSettings,
       );
-    if (pending.updateDesiredShows) await updateDesiredShows();
-    if (pending.renderSentences) {
+    }
+    if (pending.updateDesiredShows) {
+      await updateDesiredShows();
+    }
+    if (
+      pending.renderSentences &&
+      state.wkItemInfo.item &&
+      state.elements.sentences
+    ) {
       await renderSentences();
     }
   }
@@ -1997,7 +2746,9 @@
     const options = document.getElementById(
       `${script.id}_${script.secondarySortingKeyName}`,
     )?.options;
-    if (options === null) return;
+    if (options === null) {
+      return;
+    }
     const keysToHide =
       state.contentOptions.secondarySortingMethodsToHide(value);
     for (let i = 0; i < options.length; i++) {
@@ -2005,7 +2756,9 @@
         optionName = option.getAttribute('name');
       const shouldHide = keysToHide.includes(optionName);
       option.classList.toggle('hidden', shouldHide);
-      if (options.selectedIndex === i && shouldHide) options.selectedIndex = 0;
+      if (options.selectedIndex === i && shouldHide) {
+        options.selectedIndex = 0;
+      }
     }
   }
 
@@ -2015,19 +2768,17 @@
   }
 
   async function onAppearanceOptionChanged(name, value) {
-    if (value === state.settings.general.appearance[name]) return;
+    if (value === state.settings.general.appearance[name]) {
+      return;
+    }
     state.settings.general.appearance[name] = value;
     let selector;
     switch (name) {
       case 'exampleLimit': {
-        // Adjust the example limit with CSS to avoid recreating the list
-        const replacement = Number(value) === 0 ? '$1' : `$1(n+${value + 1})`;
-        state.elements.styleSheet.innerHTML =
-          state.elements.styleSheet.innerHTML.replace(
-            script.regex.exampleLimitSearch,
-            replacement,
-          );
         state.pending.updateSearchUrl = state.pending.renderSentences = true;
+        if (state.wkItemInfo.item && state.elements.sentences) {
+          await renderSentences();
+        }
         return;
       }
       case 'maxBoxHeight': {
@@ -2059,6 +2810,9 @@
         return;
     }
     // On reached for the text displaying options
+    if (!state.elements.sentences) {
+      return;
+    }
     const exampleEls = state.elements.sentences.querySelectorAll(selector);
     const promises = [];
     for (let i = 0; i < exampleEls.length; i++) {
@@ -2070,12 +2824,17 @@
   }
 
   async function onAdvancedOptionChanged(name, value) {
-    if (value === state.settings.general.advanced[name]) return;
+    if (value === state.settings.general.advanced[name]) {
+      return;
+    }
     state.settings.general.advanced[name] = value;
     switch (name) {
       case 'debugging':
         break;
       case 'failWhenHidden':
+        if (!state.wkItemInfo.item || !state.elements.sentences) {
+          return;
+        }
         await renderSentences();
         break;
       case 'immersionKitAPIVersion':
@@ -2086,16 +2845,24 @@
 
   // Called by any setting listener to verify the setting is different from the existing value
   async function onPlaybackOptionChanged(name, value) {
-    if (value === state.settings.general.playback[name]) return;
+    if (value === state.settings.general.playback[name]) {
+      return;
+    }
     state.settings.general.playback[name] = value;
-    const audioContainer = state.elements.base?.querySelector('audio');
-    if (audioContainer === null) return;
+    const audioContainer = state.elements.base?.querySelectorAll('audio');
+    if (audioContainer == null) {
+      return;
+    }
     switch (name) {
       case 'playbackRate':
-        audioContainer.playbackRate = (value * 2) / 100;
+        for (const audio of audioContainer) {
+          audio.playbackRate = (value * 2) / 100;
+        }
         break;
       case 'playbackVolume':
-        audioContainer.volume = value / 100;
+        for (const audio of audioContainer) {
+          audio.volume = value / 100;
+        }
         break;
       case 'restartAudioOnPause':
         break;
@@ -2103,12 +2870,17 @@
   }
 
   async function onFetchOptionChanged(name, value) {
-    if (value === state.settings.general.dataFetching[name]) return;
+    if (value === state.settings.general.dataFetching[name]) {
+      return;
+    }
     let prevRetryCount = state.settings.general.dataFetching.retryCount;
     state.settings.general.dataFetching[name] = value;
     switch (name) {
       case 'retryCount':
         // TODO: Possibly make this not affect the fetch count when the dialog was canceled instead of saved
+        if (!state.elements.sentences) {
+          return;
+        }
         if (
           state.elements.sentences.childElementCount === 0 &&
           value > prevRetryCount &&
@@ -2116,8 +2888,9 @@
             (state.immersionKit.fetchCount[
               state.immersionKit.currentSearchUrl
             ] ?? 0)
-        )
+        ) {
           await renderSentences();
+        }
         break;
       case 'retryDelay':
       case 'checkLastModified':
@@ -2128,8 +2901,9 @@
   // Called when the flush cached data button is clicked
   async function onFlushCachedDataClicked(name, value, on_change) {
     await deleteCachedImmersionKitData();
-    if (state.settings.general.advanced.debugging)
+    if (state.settings.general.advanced.debugging) {
       console.log('Immersion Kit data has been deleted.');
+    }
     state.pending.updateIndexUrl =
       state.pending.updateSearchUrl =
       state.pending.updateDesiredShows =
@@ -2146,10 +2920,13 @@
         for (const title of [
           'Good Morning Call Season 1',
           'Good Morning Call Season 2',
-        ])
+        ]) {
           state.content.drama[title] = title;
+        }
         title = 'Good Morning Call';
-        if (title in state.content.drama) delete state.content.drama[title];
+        if (title in state.content.drama) {
+          delete state.content.drama[title];
+        }
         sortObjectPropertiesInPlace(state.settings.filters.lists.drama);
         sortObjectPropertiesInPlace(state.content.drama);
         break;
@@ -2158,7 +2935,9 @@
           'Good Morning Call Season 1',
           'Good Morning Call Season 2',
         ]) {
-          if (!(title in state.content.drama)) continue;
+          if (!(title in state.content.drama)) {
+            continue;
+          }
           delete state.content.drama[title];
         }
         title = 'Good Morning Call';
@@ -2189,8 +2968,9 @@
           entry = state.content.allContent.get(title);
           entry.enabled = value;
           // Update the selection set for the settings dialog
-          if (!state.content.selections[entry.category])
+          if (!state.content.selections[entry.category]) {
             state.content.selections[entry.category] = {};
+          }
           state.content.selections[entry.category][title] = value;
         } else if (typeof value === 'boolean') {
           errors.push(
@@ -2212,8 +2992,9 @@
         }
       }
     }
-    if (errors.length > 0)
+    if (errors.length > 0) {
       console.debug(`Error(s) found during updateDesiredShows:`, errors);
+    }
     state.pending.updateDesiredShows = false;
   }
 
@@ -2240,13 +3021,15 @@
   // ---------------------------------------------------------------------------------------------------------------- //
 
   async function addStyle() {
-    if (document.getElementById(script.styleSheetName)) return;
+    if (document.getElementById(script.styleSheetName)) {
+      return;
+    }
     const {
       classNames: { audioIdle, audioButton },
       elements,
       settings: {
         general: {
-          appearance: { maxBoxHeight, exampleLimit },
+          appearance: { maxBoxHeight },
         },
       },
     } = state;
@@ -2259,7 +3042,9 @@
             #${script.id}_dialog button:hover { background-color: gray; }
             #${script.id}_dialog button:active { background-color: gray; transform: translate(0, 3px); }
             #${script.id} { max-height: ${maxBoxHeight}; overflow-y: auto; }
-            #${script.id} .example:nth-child${exampleLimit === 0 ? '' : `(n+${exampleLimit + 1})`} { display: none; }
+            #${script.id} > button { display: block; margin: 0.5em auto 1em; padding: 0.5em 1em; border: 1px solid #555; border-radius: 4px; background-color: #555; color: white; font: inherit; cursor: pointer; transition: background-color 0.1s; }
+            #${script.id} > button:hover { background-color: #444; }
+            #${script.id} > button:disabled { cursor: wait; opacity: 0.7; }
             .${script.id}-settings-btn { font-size: 14px; cursor: pointer; vertical-align: middle; margin-left: 10px; }
             #${script.id}-container { border: none; font-size: 100%; }
             #${script.id} pre { white-space: pre-wrap; white-space: -moz-pre-wrap; white-space: -pre-wrap; white-space: -o-pre-wrap; word-wrap: break-word; }
@@ -2289,6 +3074,23 @@
   // ----------------------------------------------------FURIGANA---------------------------------------------------- //
   // ---------------------------------------------------------------------------------------------------------------- //
 
+  function escapeHtml(text) {
+    return text.replace(/[&<>"']/g, (character) => {
+      switch (character) {
+        case '&':
+          return '&amp;';
+        case '<':
+          return '&lt;';
+        case '>':
+          return '&gt;';
+        case '"':
+          return '&quot;';
+        case "'":
+          return '&#39;';
+      }
+    });
+  }
+
   function Furigana(expression, expressionWithFurigana) {
     this.expression = expression;
     this.expressionWithFurigana = expressionWithFurigana;
@@ -2304,12 +3106,23 @@
   };
 
   Furigana.prototype.getExpressionHtml = function () {
-    return this.keywordRegex === null
-      ? this.expression
-      : this.expression.replaceAll(
-          this.keywordRegex,
-          `<${this.keywordTag}>$&</${this.keywordTag}>`,
-        );
+    const keywordMatches =
+      this.keywordRegex !== null
+        ? Array.from(this.expression.matchAll(this.keywordRegex))
+        : [];
+    let html = '',
+      nextIndex = 0;
+    for (const match of keywordMatches) {
+      if (match.index === undefined) {
+        continue;
+      }
+      html += escapeHtml(
+        this.expression.substring(nextIndex, match.index),
+      );
+      html += `<${this.keywordTag}>${escapeHtml(match[0])}</${this.keywordTag}>`;
+      nextIndex = match.index + match[0].length;
+    }
+    return html + escapeHtml(this.expression.substring(nextIndex));
   };
 
   Furigana.prototype.getFuriganaHtml = function () {
@@ -2322,15 +3135,19 @@
       const { base, furigana } = normalizedSegments[i];
       html +=
         furigana !== null
-          ? `<ruby>${base}<rp>[</rp><rt>${furigana}</rt><rp>]</rp></ruby>`
+          ? `<ruby>${base}<rp>[</rp><rt>${escapeHtml(furigana)}</rt><rp>]</rp></ruby>`
           : base;
     }
     return html;
   };
 
   Furigana.prototype.getFirstKeywordIndex = function () {
-    if (this.keyword === null) return -1;
-    if (this.firstKeywordIndex !== null) return this.firstKeywordIndex;
+    if (this.keyword === null) {
+      return -1;
+    }
+    if (this.firstKeywordIndex !== null) {
+      return this.firstKeywordIndex;
+    }
     return (this.firstKeywordIndex = this.expression.search(this.keywordRegex));
   };
 
@@ -2348,49 +3165,43 @@
 
   Furigana.prototype.normalizeSegments = function (segments, expression) {
     const normalizedSegments = [],
-      keywordRegex = this.keywordRegex,
-      keywordTag = this.keywordTag;
-    let nextIndex = 0,
-      markStart = 0,
-      markRemaining = 0;
+      keywordRegex = this.keywordRegex;
     const keywordMatches =
       keywordRegex !== null
         ? Array.from(expression.matchAll(keywordRegex))
         : [];
 
+    let nextIndex = 0;
     for (let i = 0; i < segments.length; i++) {
       const curIndex = nextIndex;
       if (i === segments.length - 1) {
         nextIndex = expression.length;
       } else {
         nextIndex = expression.indexOf(segments[i + 1].base[0], nextIndex);
-        if (nextIndex === -1) nextIndex = curIndex + segments[i].base.length;
+        if (nextIndex === -1) {
+          nextIndex = curIndex + segments[i].base.length;
+        }
       }
-      let matchingSection = expression.substring(curIndex, nextIndex);
-      let offset = 0;
-      for (let j = 0; j < keywordMatches.length; j++) {
-        const match = keywordMatches[j];
-        if (match.index === undefined) continue;
+      let matchingSection = '',
+        textIndex = curIndex;
+      for (const match of keywordMatches) {
+        if (match.index === undefined) {
+          continue;
+        }
         const [start, end] = [match.index, match.index + match[0].length];
-        if (this.firstKeywordIndex === null && start >= 0)
+        if (this.firstKeywordIndex === null && start >= 0) {
           this.firstKeywordIndex = start;
-        if (start >= curIndex && start < nextIndex) {
-          markStart = offset + start - curIndex;
-          markRemaining = offset + end - curIndex - markStart;
         }
-        if (markRemaining > 0) {
-          const segmentLength = matchingSection.length;
-          const markEnd = Math.min(markStart + markRemaining, segmentLength);
-          const precedingSection = matchingSection.substring(0, markStart);
-          const markedSegment = matchingSection.substring(markStart, markEnd);
-          const remainingSegment = matchingSection.substring(markEnd);
-          matchingSection = `${precedingSection}<${keywordTag}>${markedSegment}</${keywordTag}>${remainingSegment}`;
-          markStart = 0;
-          markRemaining -= Math.min(markRemaining, markedSegment.length);
-          if (remainingSegment.length === 0) break;
-          offset += keywordTag.length * 2 + 5; // 5 = '<></>'.length
+        const markStart = Math.max(start, curIndex),
+          markEnd = Math.min(end, nextIndex);
+        if (markStart < textIndex || markStart >= markEnd) {
+          continue;
         }
+        matchingSection += escapeHtml(expression.substring(textIndex, markStart));
+        matchingSection += `<${this.keywordTag}>${escapeHtml(expression.substring(markStart, markEnd))}</${this.keywordTag}>`;
+        textIndex = markEnd;
       }
+      matchingSection += escapeHtml(expression.substring(textIndex, nextIndex));
       normalizedSegments.push({
         base: matchingSection,
         furigana: segments[i].furigana,
