@@ -20,6 +20,7 @@ class Element {
     this.tagName = tag;
     this.children = [];
     this.dataset = {};
+    this.attributes = {};
     this.listeners = {};
     this.classes = new Set();
     this.classList = {
@@ -29,8 +30,13 @@ class Element {
       replace: (oldName, newName) => { this.classes.delete(oldName); this.classes.add(newName); },
     };
     this.paused = true;
+    this.offsetHeight = 20;
   }
   set className(value) { this.classes = new Set(value.split(' ')); }
+  get className() { return [...this.classes].join(' '); }
+  get options() { return this.tagName === 'select' ? this.children : undefined; }
+  set value(value) { this._value = value; }
+  get value() { return this._value ?? this.children[0]?.value ?? ''; }
   set textContent(value) { this.text = value; this.children = []; }
   get textContent() { return this.text || ''; }
   get isConnected() { return this.connected || this.parent?.isConnected || false; }
@@ -54,6 +60,8 @@ class Element {
   }
   addEventListener(name, listener) { this.listeners[name] = listener; }
   removeEventListener(name) { delete this.listeners[name]; }
+  setAttribute(name, value) { this.attributes[name] = String(value); }
+  getAttribute(name) { return this.attributes[name] ?? null; }
   async click() { await this.listeners.click?.({ stopPropagation() {}, currentTarget: this }); }
   async play() {
     this.paused = false;
@@ -61,7 +69,16 @@ class Element {
     this.onplaying?.({ currentTarget: this });
   }
   pause() { this.paused = true; this.onpause?.({ currentTarget: this }); }
-  closest() { return null; }
+  closest(selector) {
+    if (selector !== 'li[data-source-title]') return null;
+    let element = this;
+    while (element) {
+      if (element.tagName === 'li' && element.dataset.sourceTitle) return element;
+      element = element.parent;
+    }
+    return null;
+  }
+  getBoundingClientRect() { return { top: 0 }; }
 }
 
 function harness({ fetch = async () => { throw new Error('Unexpected network request'); }, files = {}, wkof = true } = {}) {
@@ -129,7 +146,10 @@ function harness({ fetch = async () => { throw new Error('Unexpected network req
     'startBackgroundPrewarmer', 'onFlushCachedDataClicked', 'migrateSettingsVersion',
     'onAppearanceOptionChanged', 'onPlaybackOptionChanged', 'onFetchOptionChanged',
     'onAdvancedOptionChanged', 'onSettingsSaved', 'updateDesiredShows', 'prepareExample', 'Furigana',
-    'updateKeyMapForTitles', 'addMissingEntriesToContent',
+    'updateKeyMapForTitles', 'addMissingEntriesToContent', 'sortSentences',
+    'movePreferredSourceInOrder', 'renderPreferredSourcesSettings',
+    'getMediaCacheTrimPlan',
+    'scheduleMenuInstall',
   ];
   vm.runInContext(source.replace(
     /Promise\.resolve\(\)\s*\.then\(init\)/,
@@ -137,8 +157,13 @@ function harness({ fetch = async () => { throw new Error('Unexpected network req
   ), context);
   const api = window.testAPI;
   const media = new Map();
+  const mediaPutLimits = [];
   api.ikMediaCacheDB.get = async (url) => media.get(url);
-  api.ikMediaCacheDB.put = async (url, blob) => media.set(url, { url, blob });
+  api.ikMediaCacheDB.put = async (url, blob, maxBytes) => {
+    mediaPutLimits.push(maxBytes);
+    media.set(url, { url, blob });
+  };
+  api.ikMediaCacheDB.trimToLimit = async () => {};
   api.ikMediaCacheDB.clear = async () => media.clear();
   api.updateKeyMapForTitles();
   api.addMissingEntriesToContent();
@@ -146,7 +171,7 @@ function harness({ fetch = async () => { throw new Error('Unexpected network req
   api.state.elements.base = body;
   api.state.elements.sentences = new Element();
   body.append(api.state.elements.sentences);
-  return { ...api, timers, saves, deleted, warnings, framework, files, media, observers, mutations, windowEvents, documentEvents, document, revoked };
+  return { ...api, timers, saves, deleted, warnings, framework, files, media, mediaPutLimits, observers, mutations, windowEvents, documentEvents, document, revoked };
 }
 
 function example(id, sentence = '猫です') {
@@ -208,6 +233,79 @@ test('empty results are permanent and never retried', async () => {
   assert.deepEqual(Object.keys(h.state.immersionKit.cache.urls['v2:none'].data.deck_count), []);
 });
 
+test('v1 kanji retries use explicit item type and reuse the cached fallback', async () => {
+  const urls = [];
+  const h = harness({
+    fetch: async (url) => {
+      urls.push(url);
+      return response({
+        data: [urls.length === 1 ? data([]) : data([example('kanji-fallback')])],
+      });
+    },
+  });
+  h.state.settings.general.advanced.immersionKitAPIVersion = '1';
+  h.state.wkItemInfo.item.type = 'vocabulary';
+
+  const result = await h.fetchImmersionKitData('猫', { itemType: 'Kanji' });
+  assert.equal(result.examples[0].id, 'kanji-fallback');
+  assert.equal(urls.length, 2);
+  const primaryUrl = urls[0];
+  const fallbackUrl = urls[1];
+  assert.equal(
+    h.state.immersionKit.cache.urls[primaryUrl].data.examples.length,
+    0,
+  );
+  assert.equal(
+    h.state.immersionKit.cache.urls[fallbackUrl].data.examples[0].id,
+    'kanji-fallback',
+  );
+
+  assert.equal(
+    (await h.fetchImmersionKitData('猫', { itemType: 'kanji' })).examples[0].id,
+    'kanji-fallback',
+  );
+  assert.equal(
+    (await h.fetchImmersionKitData('猫', { itemType: 'vocabulary' })).examples.length,
+    0,
+  );
+  assert.equal(urls.length, 2);
+});
+
+test('failed v1 kanji fallback returns primary results for fresh and cached lookups', async () => {
+  const createHarness = (primeCache) => {
+    let calls = 0;
+    const h = harness({
+      fetch: async () => {
+        if (++calls > 1) {
+          throw new Error('fallback unavailable');
+        }
+        return response({ data: [data([])] });
+      },
+    });
+    h.state.settings.general.advanced.immersionKitAPIVersion = '1';
+    h.state.settings.general.dataFetching.retryCount = 0;
+    return { h, primeCache: async () => {
+      if (primeCache) {
+        await h.fetchImmersionKitData('猫', { itemType: 'vocabulary' });
+      }
+    } };
+  };
+
+  for (const shouldPrimeCache of [false, true]) {
+    const { h, primeCache } = createHarness(shouldPrimeCache);
+    await primeCache();
+
+    const result = await h.fetchImmersionKitData('猫', { itemType: 'kanji' });
+    assert.equal(result.examples.length, 0);
+    assert.equal(
+      h.warnings.filter(([message]) =>
+        message.includes('Could not fetch v1 kanji fallback'),
+      ).length,
+      1,
+    );
+  }
+});
+
 test('failed requests are not cached and release deduplication state', async () => {
   const h = harness({ fetch: async () => { throw new Error('offline'); } });
   await assert.rejects(h.fetchImmersionKitData('猫'), /offline/);
@@ -229,6 +327,102 @@ test('legacy URL entries survive filter changes, are promoted, and are sharded w
   const restored = harness({ files: h.files });
   await restored.restoreCachedImmersionKitData();
   assert.equal((await restored.fetchImmersionKitData('猫')).examples.length, 1);
+});
+
+test('legacy cache restore does not dirty shards and newer shards override legacy entries', async () => {
+  const legacyKey = 'media-context-sentences.immersion-kit-data';
+  const shardKey =
+    'wkof.settings.media-context-sentences.immersion-kit-data.shard.1';
+  const legacyUrl =
+    'https://apiv2.immersionkit.com/search?q=猫&wk=3&exactMatch=true';
+  const shardUrl = 'https://apiv2.immersionkit.com/search?q=猫';
+  const legacyData = data([example('legacy')]);
+  const shardedData = data([example('sharded')]);
+  const h = harness({
+    files: {
+      [legacyKey]: { [legacyUrl]: { data: legacyData } },
+      [shardKey]: { [shardUrl]: { data: shardedData } },
+    },
+  });
+
+  await h.restoreCachedImmersionKitData();
+
+  assert.equal(h.timers.size, 0);
+  assert.equal(h.saves.length, 0);
+  assert.equal(
+    h.state.immersionKit.cache.urls[legacyUrl].data.examples[0].id,
+    'legacy',
+  );
+  assert.equal(
+    h.state.immersionKit.cache.urls[shardUrl].data.examples[0].id,
+    'sharded',
+  );
+  assert.equal(
+    (await h.fetchImmersionKitData('猫')).examples[0].id,
+    'sharded',
+  );
+});
+
+test('sentence cache entries retain render fields and cap examples on insertion, restore, and save', async () => {
+  const oversizedData = data(
+    Array.from({ length: 205 }, (_, index) => ({
+      ...example(`sentence-${index}`),
+      unused_payload: 'discard me',
+    })),
+  );
+  const h = harness();
+  h.setCachedData('v2:猫', { data: oversizedData });
+
+  const cachedExamples = h.state.immersionKit.cache.urls['v2:猫'].data.examples;
+  assert.equal(cachedExamples.length, 200);
+  assert.deepEqual(Object.keys(cachedExamples[0]).sort(), [
+    'id', 'image', 'sentence', 'sentence_with_furigana', 'sound', 'title',
+    'translation', 'word_list', 'matched_indexes',
+  ].sort());
+  assert.equal(oversizedData.examples.length, 205);
+  assert.equal(oversizedData.examples[0].unused_payload, 'discard me');
+
+  const fetched = harness({
+    fetch: async () => response(oversizedData),
+  });
+  const fetchedData = await fetched.fetchImmersionKitData('猫');
+  assert.equal(fetchedData.examples.length, 200);
+  assert.equal(fetchedData.examples[0].unused_payload, undefined);
+
+  await h.saveCachedImmersionKitData();
+  const savedEntry = h.saves[0][1]['v2:猫'];
+  assert.equal(savedEntry.data.examples.length, 200);
+  assert.equal(savedEntry.data.examples[0].unused_payload, undefined);
+
+  const legacyKey = 'media-context-sentences.immersion-kit-data';
+  const legacyUrl = 'https://apiv2.immersionkit.com/search?q=猫&wk=3&exactMatch=true';
+  const shardUrl = 'https://apiv2.immersionkit.com/search?q=犬';
+  const shardKey =
+    'wkof.settings.media-context-sentences.immersion-kit-data.shard.2';
+  const restored = harness({
+    files: {
+      [legacyKey]: { [legacyUrl]: { data: oversizedData } },
+      [shardKey]: { [shardUrl]: { data: oversizedData } },
+    },
+  });
+  await restored.restoreCachedImmersionKitData();
+  assert.equal(
+    restored.state.immersionKit.cache.urls[legacyUrl].data.examples.length,
+    200,
+  );
+  assert.equal(
+    restored.state.immersionKit.cache.urls[legacyUrl].data.examples[0].unused_payload,
+    undefined,
+  );
+  assert.equal(
+    restored.state.immersionKit.cache.urls[shardUrl].data.examples.length,
+    200,
+  );
+  assert.equal(
+    restored.state.immersionKit.cache.urls[shardUrl].data.examples[0].unused_payload,
+    undefined,
+  );
+  assert.equal(restored.saves.length, 0);
 });
 
 test('cache saves are debounced, bounded by a maximum delay, and write only dirty shards', async () => {
@@ -294,6 +488,7 @@ test('difficulty ID masks are deduplicated and retained across level changes wit
 test('media is deduplicated, persisted as Blobs, and reused from memory and disk', async () => {
   let calls = 0;
   const h = harness({ fetch: async () => { calls++; return response({}); } });
+  assert.equal(h.state.settings.general.dataFetching.mediaCacheLimitMB, 500);
   const urls = await Promise.all([h.getMediaBlobUrl('https://media/a.mp3'), h.getMediaBlobUrl('https://media/a.mp3')]);
   assert.equal(urls[0], urls[1]);
   assert.match(urls[0], /^blob:/);
@@ -303,6 +498,78 @@ test('media is deduplicated, persisted as Blobs, and reused from memory and disk
   h.mediaObjectUrls.clear();
   assert.match(await h.getMediaBlobUrl('https://media/a.mp3'), /^blob:/);
   assert.equal(calls, 1);
+  assert.deepEqual(h.mediaPutLimits, [500 * 1024 * 1024]);
+});
+
+test('media cache size setting trims existing disk data and zero disables disk writes', async () => {
+  const h = harness({ fetch: async () => response({}) });
+  const trimLimits = [];
+  h.ikMediaCacheDB.trimToLimit = async (maxBytes) => trimLimits.push(maxBytes);
+
+  await h.onFetchOptionChanged('mediaCacheLimitMB', 250);
+  assert.equal(h.state.settings.general.dataFetching.mediaCacheLimitMB, 250);
+  assert.deepEqual(trimLimits, [250 * 1024 * 1024]);
+
+  await h.onFetchOptionChanged('mediaCacheLimitMB', 0);
+  await h.getMediaBlobUrl('https://media/no-disk-cache.mp3');
+  assert.equal(h.mediaPutLimits.length, 0);
+  assert.deepEqual(trimLimits, [250 * 1024 * 1024, 0]);
+});
+
+test('media cache trim plan evicts least-recently-used items to remain within the byte limit', () => {
+  const h = harness();
+  const records = [
+    { url: 'old', blob: { size: 6 }, timestamp: 1 },
+    { url: 'newer', blob: { size: 4 }, timestamp: 2 },
+  ];
+  const plan = h.getMediaCacheTrimPlan(records, 10, {
+    url: 'incoming',
+    blob: { size: 5 },
+    timestamp: 3,
+  });
+
+  assert.deepEqual(Array.from(plan.evictedUrls), ['old']);
+  assert.equal(plan.shouldStore, true);
+  assert.deepEqual(
+    Array.from(h.getMediaCacheTrimPlan(records, 3).evictedUrls),
+    ['old', 'newer'],
+  );
+  assert.equal(
+    h.getMediaCacheTrimPlan(records, 3, {
+      url: 'too-large',
+      blob: { size: 4 },
+      timestamp: 3,
+    }).shouldStore,
+    false,
+  );
+  assert.equal(
+    h.getMediaCacheTrimPlan([], 0, {
+      url: 'zero-limit',
+      blob: { size: 0 },
+      timestamp: 3,
+    }).shouldStore,
+    false,
+  );
+  assert.deepEqual(records.map(({ url }) => url), ['old', 'newer']);
+});
+
+test('media object URLs use a 100-entry LRU and revoke evicted URLs', async () => {
+  const h = harness({ fetch: async () => response({}) });
+  const urls = [];
+  for (let i = 0; i < 100; i++) {
+    urls.push(await h.getMediaBlobUrl(`https://media/${i}.mp3`));
+  }
+
+  assert.equal(await h.getMediaBlobUrl('https://media/0.mp3'), urls[0]);
+  const newestUrl = await h.getMediaBlobUrl('https://media/100.mp3');
+
+  assert.equal(h.mediaObjectUrls.size, 100);
+  assert.equal(h.mediaObjectUrls.has('https://media/0.mp3'), true);
+  assert.equal(h.mediaObjectUrls.has('https://media/1.mp3'), false);
+  assert.equal(h.mediaObjectUrls.has('https://media/100.mp3'), true);
+  assert.ok(h.revoked.includes(urls[1]));
+  assert.ok(!h.revoked.includes(urls[0]));
+  assert.equal(h.mediaObjectUrls.get('https://media/100.mp3'), newestUrl);
 });
 
 test('CORS and storage errors fall back to playable remote media or memory Blobs', async () => {
@@ -336,6 +603,37 @@ test('manual Flush clears all stores and old requests cannot resurrect entries',
   assert.equal(Object.keys(h.files).length, 0);
 });
 
+test('manual Flush continues clearing after an in-progress sentence-cache save fails', async () => {
+  const h = harness();
+  const pendingSave = deferred();
+  h.setCachedData('v2:old', { data: data() });
+  await h.saveCachedImmersionKitData();
+  h.setCachedData('v2:new', { data: data() });
+  h.media.set('https://media/old', {
+    url: 'https://media/old',
+    blob: new Blob(['old']),
+  });
+  h.mediaObjectUrls.set('https://media/old', 'blob:old');
+
+  h.framework.file_cache.save = async () => pendingSave.promise;
+  const failedSave = h.saveCachedImmersionKitData();
+  let notified = false;
+  const flushing = h.onFlushCachedDataClicked(null, null, async () => {
+    notified = true;
+  });
+  pendingSave.reject(new Error('quota exceeded'));
+  await assert.rejects(failedSave, /quota exceeded/);
+  await flushing;
+
+  assert.equal(notified, true);
+  assert.equal(Object.keys(h.state.immersionKit.cache.urls).length, 0);
+  assert.equal(h.media.size, 0);
+  assert.equal(h.mediaObjectUrls.size, 0);
+  assert.equal(Object.keys(h.files).length, 0);
+  assert.ok(h.warnings.some((args) => args[0].includes('before cache clear')));
+  await h.saveCachedImmersionKitData();
+});
+
 test('rendering sorts before limiting, creates only visible candidates, and preserves raw JSON', async () => {
   let networkCalls = 0;
   const h = harness({ fetch: async () => { networkCalls++; return response({}); } });
@@ -359,6 +657,204 @@ test('rendering sorts before limiting, creates only visible candidates, and pres
   await tick();
   assert.equal(networkCalls, 1);
   assert.match(img.src, /^blob:/);
+});
+
+test('filter diagnostics render API-derived titles and deck counts as plain text', async () => {
+  const h = harness();
+  const unsafeTitle = '<img src=x onerror=alert(1)>';
+  const unsafeCountKey = '<svg onload=alert(1)>';
+  h.state.content.allContent.set(unsafeTitle, {
+    title: unsafeTitle,
+    category: 'anime',
+    tags: [],
+    enabled: false,
+  });
+  h.state.content.keyTitleMap.set('unsafe-title-key', unsafeTitle);
+  h.state.content.titleKeyMap.set(unsafeTitle, 'unsafe-title-key');
+  h.state.settings.general.advanced.debugging = true;
+  h.state.settings.general.advanced.failWhenHidden = true;
+  h.setCachedData('v2:猫', {
+    data: {
+      examples: [{ ...example('hidden'), title: 'unsafe-title-key' }],
+      deck_count: { [unsafeCountKey]: 1 },
+    },
+  });
+
+  await h.renderSentences();
+
+  const diagnostic = h.state.elements.sentences.children[0];
+  assert.ok(
+    diagnostic,
+    JSON.stringify({
+      textContent: h.state.elements.sentences.textContent,
+      warnings: h.warnings.map((warning) =>
+        warning.map((value) => String(value)),
+      ),
+    }),
+  );
+  assert.equal(diagnostic.tagName, 'pre');
+  assert.equal(diagnostic.innerHTML, undefined);
+  assert.match(diagnostic.textContent, /Currently hidden titles:/);
+  assert.ok(diagnostic.textContent.includes(unsafeTitle));
+  assert.ok(diagnostic.textContent.includes(unsafeCountKey));
+  assert.ok(diagnostic.textContent.includes('\nComplete deck count data:'));
+});
+
+test('preferred source sorting follows title fragments and uses the secondary sort for ties', () => {
+  const h = harness();
+  const sentences = [
+    { title: 'Other Show', category: 'anime', sentence: '猫です' },
+    { title: 'Shirokuma Cafe Season 2', category: 'anime', sentence: '猫です' },
+    { title: 'News Source', category: 'news', sentence: '猫です' },
+    { title: 'Shirokuma Cafe', category: 'anime', sentence: '猫です' },
+    { title: 'Another Show', category: 'anime', sentence: '猫です' },
+  ];
+
+  h.sortSentences(sentences, 'preferredSources', 'source', 'Shirokuma Cafe, News');
+
+  assert.deepEqual(sentences.map(({ title }) => title), [
+    'Shirokuma Cafe',
+    'Shirokuma Cafe Season 2',
+    'News Source',
+    'Another Show',
+    'Other Show',
+  ]);
+});
+
+test('preferred source sorting accepts an ordered array of source titles', () => {
+  const h = harness();
+  const sentences = [
+    { title: 'Other Show', category: 'anime', sentence: '猫です' },
+    { title: 'Shirokuma Cafe Season 2', category: 'anime', sentence: '猫です' },
+    { title: 'News Source', category: 'news', sentence: '猫です' },
+    { title: 'Shirokuma Cafe', category: 'anime', sentence: '猫です' },
+  ];
+
+  h.sortSentences(sentences, 'preferredSources', 'default', [
+    'Shirokuma Cafe',
+    'News Source',
+  ]);
+
+  assert.deepEqual(sentences.map(({ title }) => title), [
+    'Shirokuma Cafe',
+    'News Source',
+    'Other Show',
+    'Shirokuma Cafe Season 2',
+  ]);
+});
+
+test('preferred source sorting uses display titles instead of Immersion Kit deck keys', () => {
+  const h = harness();
+  h.state.content.allContent.set('Shirokuma Cafe', {
+    title: 'Shirokuma Cafe',
+    category: 'anime',
+    tags: [],
+    enabled: true,
+  });
+  h.state.content.allContent.set('Other Show', {
+    title: 'Other Show',
+    category: 'anime',
+    tags: [],
+    enabled: true,
+  });
+  h.state.content.keyTitleMap.set('shirokuma_cafe', 'Shirokuma Cafe');
+
+  const sentences = [
+    h.prepareExample({ ...example('other'), title: 'Other Show' }, '猫'),
+    h.prepareExample(
+      { ...example('preferred'), title: 'shirokuma_cafe' },
+      '猫',
+    ),
+  ];
+  h.sortSentences(sentences, 'preferredSources', 'default', ['Shirokuma Cafe']);
+
+  assert.deepEqual(
+    sentences.map(({ title }) => title),
+    ['Shirokuma Cafe', 'Other Show'],
+  );
+});
+
+test('preferred source sorting leaves Immersion Kit order unchanged with no preferences', () => {
+  const h = harness();
+  const sentences = [
+    { title: 'Zebra', category: 'anime', sentence: '猫です' },
+    { title: 'Alpha', category: 'anime', sentence: '猫です' },
+  ];
+
+  h.sortSentences(sentences, 'preferredSources', 'default', '');
+
+  assert.deepEqual(sentences.map(({ title }) => title), ['Zebra', 'Alpha']);
+});
+
+test('dragging a preferred source moves it before or after the target', () => {
+  const h = harness();
+  const sources = ['First', 'Second', 'Third'];
+
+  assert.deepEqual(
+    Array.from(h.movePreferredSourceInOrder(sources, 'Third', 'First', false)),
+    ['Third', 'First', 'Second'],
+  );
+  assert.deepEqual(
+    Array.from(h.movePreferredSourceInOrder(sources, 'First', 'Second', true)),
+    ['Second', 'First', 'Third'],
+  );
+  assert.deepEqual(sources, ['First', 'Second', 'Third']);
+});
+
+test('preferred source settings add and drag sources into the saved order', async () => {
+  const h = harness();
+  const settingsKey = 'media-context-sentences';
+  const container = new Element();
+  h.state.settings.sorting.preferredSources = ['New Game!'];
+  h.framework.settings = { [settingsKey]: structuredClone(h.state.settings) };
+  h.document.getElementById = (id) =>
+    id === `${settingsKey}-preferred-sources` ? container : null;
+
+  h.renderPreferredSourcesSettings();
+
+  const [sourceSelect, addButton, list] = container.children;
+  await addButton.click();
+  await addButton.click();
+  assert.equal(list.children.length, 3);
+  const draggedItem = list.children[2];
+  const targetItem = list.children[0];
+  list.listeners.dragstart({
+    target: draggedItem,
+    dataTransfer: { setData() {} },
+  });
+  list.listeners.drop({
+    target: targetItem,
+    clientY: 0,
+    preventDefault() {},
+  });
+
+  const expectedOrder = [
+    draggedItem.dataset.sourceTitle,
+    'New Game!',
+    list.children[2].dataset.sourceTitle,
+  ];
+  assert.deepEqual(
+    list.children.map(({ dataset }) => dataset.sourceTitle),
+    expectedOrder,
+  );
+  assert.deepEqual(
+    Array.from(h.framework.settings[settingsKey].sorting.preferredSources),
+    expectedOrder,
+  );
+  assert.equal(sourceSelect.options.length, h.state.content.allContent.size - 3);
+});
+
+test('saving preferred source priorities persists them and schedules a rerender', async () => {
+  const h = harness();
+  h.state.wkItemInfo.item = null;
+  const settings = structuredClone(h.state.settings);
+  settings.sorting.primary = 'preferredSources';
+  settings.sorting.preferredSources = ['Shirokuma Cafe'];
+
+  await h.onSettingsSaved(settings);
+
+  assert.deepEqual(h.state.settings.sorting.preferredSources, ['Shirokuma Cafe']);
+  assert.equal(h.state.pending.renderSentences, true);
 });
 
 test('unlimited results render in batches of 20 and remain accessible', async () => {
@@ -428,6 +924,108 @@ test('active event prefetches JSON and only the two shortest matching audio clip
   assert.equal(h.state.elements.sentences.textContent, '');
 });
 
+test('active event prefetch respects showOnKanji while preserving vocabulary prefetch', async () => {
+  const urls = [];
+  const h = harness({
+    fetch: async (url) => {
+      urls.push(url);
+      return response(data([]));
+    },
+  });
+  h.installActiveItemPrefetcher();
+  h.windowEvents.willShowNextQuestion({
+    detail: { subject: { type: 'Kanji', characters: '猫' } },
+  });
+  await tick();
+  assert.equal(urls.length, 0);
+
+  h.windowEvents.willShowNextQuestion({
+    detail: { subject: { type: 'Vocabulary', characters: '猫' } },
+  });
+  await tick();
+  await tick();
+  assert.equal(urls.length, 1);
+
+  h.state.settings.general.appearance.showOnKanji = true;
+  h.windowEvents.willShowNextQuestion({
+    detail: { subject: { type: 'Kanji', characters: '犬' } },
+  });
+  await tick();
+  await tick();
+  assert.equal(urls.length, 2);
+});
+
+test('kanji event and header prefetch pass their item type to v1 fallback', async () => {
+  const makeHarness = () => {
+    const urls = [];
+    const h = harness({
+      fetch: async (url) => {
+        urls.push(url);
+        return response({ data: [data([])] });
+      },
+    });
+    h.state.settings.general.advanced.immersionKitAPIVersion = '1';
+    h.state.settings.general.appearance.showOnKanji = true;
+    return { h, urls };
+  };
+
+  const eventHarness = makeHarness();
+  eventHarness.h.installActiveItemPrefetcher();
+  eventHarness.h.windowEvents.willShowNextQuestion({
+    detail: { subject: { type: 'Kanji', characters: '猫' } },
+  });
+  await tick();
+  await tick();
+  assert.equal(eventHarness.urls.length, 2);
+
+  const headerHarness = makeHarness();
+  const header = {
+    textContent: '犬',
+    closest(selector) {
+      return selector === '[data-subject-type]'
+        ? { dataset: { subjectType: 'Kanji' } }
+        : null;
+    },
+  };
+  headerHarness.h.document.querySelector = () => header;
+  headerHarness.h.installActiveItemPrefetcher();
+  headerHarness.h.mutations[0].callback();
+  await tick();
+  await tick();
+  assert.equal(headerHarness.urls.length, 2);
+});
+
+test('character header prefetch respects showOnKanji', async () => {
+  const urls = [];
+  const h = harness({
+    fetch: async (url) => {
+      urls.push(url);
+      return response(data([]));
+    },
+  });
+  const header = {
+    textContent: '猫',
+    closest(selector) {
+      if (selector === '[data-subject-type]') {
+        return { dataset: { subjectType: 'Kanji' } };
+      }
+      return null;
+    },
+  };
+  h.document.querySelector = () => header;
+  h.installActiveItemPrefetcher();
+  h.mutations[0].callback();
+  await tick();
+  assert.equal(urls.length, 0);
+
+  h.state.settings.general.appearance.showOnKanji = true;
+  h.documentEvents['turbo:load']();
+  h.mutations.at(-1).callback();
+  await tick();
+  await tick();
+  assert.equal(urls.length, 1);
+});
+
 test('background crawler selects current level, lessons and Apprentice/Guru vocabulary, and pauses for active requests', async () => {
   const urls = [], active = deferred();
   const h = harness({ fetch: (url) => {
@@ -483,6 +1081,26 @@ test('initialization does not wait for deck metadata, even on an indefinitely st
   await h.windowEvents.beforeunload();
   h.document.visibilityState = 'hidden';
   h.documentEvents.visibilitychange();
+});
+
+test('settings menu installation is deferred and coalesced across page-load events', async () => {
+  const h = harness();
+  const inserted = [];
+  h.framework.Menu = {
+    insert_script_link: (config) => inserted.push(config),
+  };
+
+  h.scheduleMenuInstall();
+  h.scheduleMenuInstall();
+  assert.equal(h.timers.size, 1);
+
+  const [timerId, timer] = h.timers.entries().next().value;
+  h.timers.delete(timerId);
+  timer.fn();
+  await tick();
+
+  assert.equal(inserted.length, 1);
+  assert.equal(inserted[0].name, 'media-context-sentences');
 });
 
 for (const version of ['2026-10-19', '2026-10-20', '4.0.0', '4.1.0', '10.0.0']) {

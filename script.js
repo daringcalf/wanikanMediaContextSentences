@@ -77,6 +77,7 @@
             default: 'Default',
             category: 'Category (anime, drama, etc.)',
             source: 'Source Title',
+            preferredSources: 'Preferred Sources',
             shortness: 'Shortest sentences first',
             longness: 'Longest sentences first',
             position: 'Position of keyword in sentence',
@@ -95,6 +96,9 @@
               case 'source':
                 keysToHide.push('category');
                 keysToHide.push('source');
+                break;
+              case 'preferredSources':
+                keysToHide.push('preferredSources');
                 break;
               case 'position':
                 keysToHide.push('position');
@@ -553,6 +557,8 @@
           retryDelay: 5000,
           // Retained for settings compatibility; permanent lookups are never revalidated.
           checkLastModified: false,
+          // Maximum persistent media cache size in MiB; 0 disables persistent media caching.
+          mediaCacheLimitMB: 500,
         },
         // Advanced Options
         advanced: {
@@ -566,10 +572,10 @@
       },
       // Sentence Sorting Options
       sorting: {
-        // Options for primary sentence sorting: default|category|shortness|longness|position
+        // Options for primary and secondary sentence sorting
         primary: 'default',
-        // Options for secondary sentence sorting: default(none)|category|shortness|longness|position
         [script.secondarySortingKeyName]: 'default',
+        preferredSources: [],
       },
       // The current version of the stored settings
       version: script.version,
@@ -720,6 +726,17 @@
                     on_change: onFetchOptionChanged,
                     path: '@general.dataFetching.retryDelay',
                   },
+                  mediaCacheLimitMB: {
+                    type: 'number',
+                    label: 'Media Cache Limit (MB)',
+                    step: 50,
+                    min: 0,
+                    default: state.settings.general.dataFetching.mediaCacheLimitMB,
+                    hover_tip:
+                      'Maximum disk space used for cached images and audio. Oldest media is removed when the limit is exceeded. Set to 0 to disable persistent media caching.',
+                    on_change: onFetchOptionChanged,
+                    path: '@general.dataFetching.mediaCacheLimitMB',
+                  },
                   checkLastModified: {
                     type: 'checkbox',
                     label: 'Compare Last-Modified Date',
@@ -805,6 +822,14 @@
                     hover_tip:
                       'Choose how you would like to sort equivalencies in the primary sorting method.\nDefault = No secondary sorting',
                     path: `@sorting.${script.secondarySortingKeyName}`,
+                  },
+                  preferredSources: {
+                    type: 'html',
+                    label: 'Preferred Sources',
+                    html: `<div id="${script.id}-preferred-sources"></div>`,
+                    wrapper: 'row',
+                    hover_tip:
+                      'Add sources to prioritize them, then drag them into the order you want. Unlisted sources follow the secondary sorting method.',
                   },
                 },
               },
@@ -965,6 +990,25 @@
 
   const inFlightRequests = new Map();
   const legacyKeywordCache = new Map();
+  const sentenceExampleCacheLimit = 200;
+  const sentenceExampleCacheFields = [
+    'id',
+    'title',
+    'deck_name',
+    'deck_name_japanese',
+    'category',
+    'sentence',
+    'sentence_with_furigana',
+    'word_list',
+    'word_index',
+    'matched_indexes',
+    'image',
+    'sound',
+    'image_url',
+    'sound_url',
+    'translation',
+  ];
+  const mediaObjectUrlLimit = 100;
   const mediaObjectUrls = new Map();
   const mediaRequests = new Map();
   const dirtyCacheShards = new Set();
@@ -973,6 +1017,7 @@
   let cacheGeneration = 0;
   let activeLookups = 0;
   let renderGeneration = 0;
+  let menuInstallTimer;
   let imageObserver;
   const ikMediaCacheDB = {
     connection: null,
@@ -1010,12 +1055,53 @@
       });
     },
     get(url) {
-      return this.transact('readonly', (store) => store.get(url));
+      return this.transact('readwrite', (store) => {
+        const request = store.get(url);
+        request.onsuccess = () => {
+          if (request.result) {
+            store.put({ ...request.result, timestamp: Date.now() });
+          }
+        };
+        return request;
+      });
     },
-    put(url, blob) {
-      return this.transact('readwrite', (store) =>
-        store.put({ url, blob, timestamp: Date.now() }),
-      );
+    trimToLimit(maxBytes, recordToAdd = null) {
+      return this.transact('readwrite', (store) => {
+        const request = store.openCursor();
+        const records = [];
+        request.onsuccess = () => {
+          const cursor = request.result;
+          if (cursor) {
+            records.push({
+              url: cursor.value.url,
+              size: Number(cursor.value.size ?? cursor.value.blob?.size) || 0,
+              timestamp: cursor.value.timestamp,
+            });
+            cursor.continue();
+            return;
+          }
+          const { evictedUrls, shouldStore } = getMediaCacheTrimPlan(
+            records,
+            maxBytes,
+            recordToAdd,
+          );
+          for (const url of evictedUrls) {
+            store.delete(url);
+          }
+          if (recordToAdd && shouldStore) {
+            store.put(recordToAdd);
+          }
+        };
+        return request;
+      });
+    },
+    put(url, blob, maxBytes) {
+      return this.trimToLimit(maxBytes, {
+        url,
+        blob,
+        size: blob.size,
+        timestamp: Date.now(),
+      });
     },
     clear() {
       return this.transact('readwrite', (store) => store.clear());
@@ -1043,7 +1129,8 @@
     }
     if (wkof) {
       await wkof.include('Apiv2,Settings,Menu');
-      // document.documentElement.addEventListener('turbo:load', () => setTimeout(() => wkof.ready('Menu').then(installMenu), 0));
+      document.addEventListener('turbo:load', scheduleMenuInstall);
+      wkof.on_pageload(script.regex.anyUrl, scheduleMenuInstall);
       await wkof.ready('Settings');
       // await createContentListsForSettings();
       await loadSettings();
@@ -1058,15 +1145,19 @@
       ]);
       await updateDesiredShows();
       await wkof.ready('Menu');
-      installMenu();
-      wkof.on_pageload(script.regex.anyUrl, () =>
-        wkof.ready('Menu').then(installMenu),
-      );
+      scheduleMenuInstall();
     } else {
       console.warn(
         `${script.name}: You are not using Wanikani Open Framework which this script utilizes to provide the settings dialog for the script. You can still use ${script.name} normally though`,
       );
       await Promise.all([addStyle(), updateDesiredShows()]);
+    }
+    try {
+      await ikMediaCacheDB.trimToLimit(
+        state.settings.general.dataFetching.mediaCacheLimitMB * 1024 * 1024,
+      );
+    } catch (error) {
+      console.warn(`${script.name}: Could not enforce media cache limit`, error);
     }
     window.mediaContextSentences = state;
     setWaniKaniItemInfoListener();
@@ -1111,7 +1202,7 @@
     }
   }
 
-  async function addContextSentences() {
+  async function addContextSentences(itemType) {
     state.elements.base = Object.assign(document.createElement('div'), {
       id: `${script.id}-container`,
     });
@@ -1146,7 +1237,7 @@
       );
     }
 
-    await renderSentences();
+    await renderSentences(itemType);
   }
 
   function getNewImmersionKitUrl(keyword, settings = state.settings) {
@@ -1163,6 +1254,39 @@
     return url;
   }
 
+  function normalizeSentenceCacheEntry(entry) {
+    if (!Array.isArray(entry?.data?.examples)) {
+      return entry;
+    }
+    const examples = entry.data.examples;
+    const shouldNormalize =
+      examples.length > sentenceExampleCacheLimit ||
+      !Object.hasOwn(entry.data, 'deck_count') ||
+      examples.some((example) =>
+        Object.keys(example).some(
+          (field) => !sentenceExampleCacheFields.includes(field),
+        ),
+      );
+    if (!shouldNormalize) {
+      return entry;
+    }
+    return {
+      ...entry,
+      data: {
+        deck_count: entry.data.deck_count ?? {},
+        examples: examples
+          .slice(0, sentenceExampleCacheLimit)
+          .map((example) =>
+            Object.fromEntries(
+              sentenceExampleCacheFields
+                .filter((field) => Object.hasOwn(example, field))
+                .map((field) => [field, example[field]]),
+            ),
+          ),
+      },
+    };
+  }
+
   async function restoreCachedImmersionKitData() {
     if (!wkof) {
       return;
@@ -1172,7 +1296,9 @@
       if (cache.key in wkof.file_cache.dir) {
         const legacy = await wkof.file_cache.load(cache.key);
         for (const [key, entry] of Object.entries(legacy)) {
-          setCachedData(key, entry);
+          const normalizedEntry = normalizeSentenceCacheEntry(entry);
+          cache.urls[key] = normalizedEntry;
+          indexLegacyCacheEntry(key, normalizedEntry);
         }
       }
       await Promise.all(
@@ -1181,9 +1307,18 @@
           .map(async (key) => {
             const entries = await wkof.file_cache.load(key);
             const shard = Number(key.slice(cache.shardPrefix.length));
-            cacheShards.set(shard, { ...cacheShards.get(shard), ...entries });
-            Object.assign(cache.urls, entries);
-            for (const [entryKey, entry] of Object.entries(entries)) {
+            const normalizedEntries = Object.fromEntries(
+              Object.entries(entries).map(([entryKey, entry]) => [
+                entryKey,
+                normalizeSentenceCacheEntry(entry),
+              ]),
+            );
+            cacheShards.set(shard, {
+              ...cacheShards.get(shard),
+              ...normalizedEntries,
+            });
+            Object.assign(cache.urls, normalizedEntries);
+            for (const [entryKey, entry] of Object.entries(normalizedEntries)) {
               indexLegacyCacheEntry(entryKey, entry);
             }
           }),
@@ -1203,7 +1338,15 @@
     maxSaveTimer = undefined;
     dirtyCacheShards.clear();
     if (savingCache) {
-      await savingCache;
+      try {
+        await savingCache;
+      } catch (error) {
+        console.warn(
+          `${script.name}: Could not finish saving before cache clear`,
+          error,
+        );
+      }
+      dirtyCacheShards.clear();
     }
     if (wkof) {
       const { cache } = state.immersionKit;
@@ -1232,12 +1375,14 @@
   }
 
   function setCachedData(key, entry) {
+    entry = normalizeSentenceCacheEntry(entry);
     state.immersionKit.cache.urls[key] = entry;
     indexLegacyCacheEntry(key, entry);
     let hash = 0;
     for (let i = 0; i < key.length; i++) {
       hash = (hash * 31 + key.charCodeAt(i)) | 0;
     }
+
     const shard = hash & 63;
     if (!cacheShards.has(shard)) {
       cacheShards.set(shard, {});
@@ -1245,6 +1390,39 @@
     cacheShards.get(shard)[key] = entry;
     dirtyCacheShards.add(shard);
     scheduleSaveCachedData();
+  }
+
+  function getMediaCacheTrimPlan(records, maxBytes, recordToAdd = null) {
+    const limit = Math.max(0, Number(maxBytes) || 0);
+    const addRecord =
+      recordToAdd &&
+      limit > 0 &&
+      Number(recordToAdd.size ?? recordToAdd.blob?.size) <= limit
+        ? recordToAdd
+        : null;
+    const retainedRecords = records.filter(
+      (record) => !addRecord || record.url !== addRecord.url,
+    );
+    let totalBytes = retainedRecords.reduce(
+      (total, record) =>
+        total + (Number(record.size ?? record.blob?.size) || 0),
+      addRecord
+        ? Number(addRecord.size ?? addRecord.blob?.size) || 0
+        : 0,
+    );
+    const oldestFirst = [...retainedRecords].sort(
+      (a, b) => (Number(a.timestamp) || 0) - (Number(b.timestamp) || 0),
+    );
+    const evictedUrls = [];
+    while (totalBytes > limit && oldestFirst.length > 0) {
+      const record = oldestFirst.shift();
+      evictedUrls.push(record.url);
+      totalBytes -= Number(record.size ?? record.blob?.size) || 0;
+    }
+    return {
+      evictedUrls,
+      shouldStore: Boolean(addRecord) && totalBytes <= limit,
+    };
   }
 
   function indexLegacyCacheEntry(key, entry) {
@@ -1287,9 +1465,20 @@
         const shard = dirtyCacheShards.values().next().value;
         dirtyCacheShards.delete(shard);
         try {
+          const entries = Object.fromEntries(
+            Object.entries(cacheShards.get(shard)).map(([key, entry]) => [
+              key,
+              normalizeSentenceCacheEntry(entry),
+            ]),
+          );
+          cacheShards.set(shard, entries);
+          Object.assign(state.immersionKit.cache.urls, entries);
+          for (const [key, entry] of Object.entries(entries)) {
+            indexLegacyCacheEntry(key, entry);
+          }
           await wkof.file_cache.save(
             `${state.immersionKit.cache.shardPrefix}${shard}`,
-            { ...cacheShards.get(shard) },
+            entries,
           );
         } catch (error) {
           dirtyCacheShards.add(shard);
@@ -1502,9 +1691,12 @@
         if (!Array.isArray(data?.examples)) {
           throw new Error('Invalid Immersion Kit sentence response');
         }
-        return data.examples.length === 0
-          ? { ...data, examples: [], deck_count: {} }
-          : data;
+        return normalizeSentenceCacheEntry({
+          data:
+            data.examples.length === 0
+              ? { ...data, examples: [], deck_count: {} }
+              : data,
+        }).data;
       } catch (error) {
         if (attempt >= Number(retryCount)) {
           throw error;
@@ -1520,6 +1712,7 @@
     {
       background = false,
       version = state.settings.general.advanced.immersionKitAPIVersion,
+      itemType,
     } = {},
   ) {
     if (!background) {
@@ -1532,11 +1725,29 @@
         if (String(version) === '2' && !state.immersionKit.cache.urls[key]) {
           setCachedData(key, cached);
         }
+        if (
+          String(version) === '1' &&
+          cached.data.examples.length === 0 &&
+          !background &&
+          String(itemType).toLowerCase() === 'kanji'
+        ) {
+          return fetchV1KanjiFallbackOrPrimary(
+            keyword,
+            cacheGeneration,
+            cached.data,
+          );
+        }
         return cached.data;
       }
       const { key, url } = getLookupRequest(keyword, version);
-      if (inFlightRequests.has(key)) {
-        return await inFlightRequests.get(key);
+      const requestKey =
+        String(version) === '1' &&
+        String(itemType).toLowerCase() === 'kanji' &&
+        !background
+          ? `${key}:kanji`
+          : key;
+      if (inFlightRequests.has(requestKey)) {
+        return await inFlightRequests.get(requestKey);
       }
       const generation = cacheGeneration;
       const request = requestImmersionKitJSON(url, version).then(
@@ -1545,18 +1756,12 @@
             String(version) === '1' &&
             data.examples.length === 0 &&
             !background &&
-            state.wkItemInfo.item?.type === 'kanji'
+            String(itemType).toLowerCase() === 'kanji'
           ) {
-            const api = state.immersionKit.api['1'];
-            const options = state.immersionKit.getSearchOptions(state.settings);
-            options.exactSearch = !options.exactSearch;
-            const alternateUrl = `${api.origin}${api.endpoints.query.pathname}${api.endpoints.query.getSearch(keyword, options)}`;
-            data =
-              state.immersionKit.cache.urls[alternateUrl]?.data ||
-              (await requestImmersionKitJSON(alternateUrl, version));
             if (generation === cacheGeneration) {
-              setCachedData(alternateUrl, { data, cachedAt: Date.now() });
+              setCachedData(key, { data, cachedAt: Date.now() });
             }
+            return fetchV1KanjiFallbackOrPrimary(keyword, generation, data);
           }
           if (generation === cacheGeneration) {
             setCachedData(key, { data, cachedAt: Date.now() });
@@ -1564,18 +1769,63 @@
           return data;
         },
       );
-      inFlightRequests.set(key, request);
+      inFlightRequests.set(requestKey, request);
       try {
         return await request;
       } finally {
-        if (inFlightRequests.get(key) === request) {
-          inFlightRequests.delete(key);
+        if (inFlightRequests.get(requestKey) === request) {
+          inFlightRequests.delete(requestKey);
         }
       }
     } finally {
       if (!background) {
         activeLookups--;
       }
+    }
+  }
+
+  async function fetchV1KanjiFallback(keyword, generation) {
+    const api = state.immersionKit.api['1'];
+    const options = state.immersionKit.getSearchOptions(state.settings);
+    options.exactSearch = !options.exactSearch;
+    const alternateUrl = `${api.origin}${api.endpoints.query.pathname}${api.endpoints.query.getSearch(keyword, options)}`;
+    const cached = state.immersionKit.cache.urls[alternateUrl]?.data;
+    if (cached) {
+      return cached;
+    }
+    const requestKey = `kanji-fallback:${alternateUrl}`;
+    let request = inFlightRequests.get(requestKey);
+    if (!request) {
+      request = requestImmersionKitJSON(alternateUrl, '1').then((data) => {
+        if (generation === cacheGeneration) {
+          setCachedData(alternateUrl, { data, cachedAt: Date.now() });
+        }
+        return data;
+      });
+      inFlightRequests.set(requestKey, request);
+    }
+    try {
+      return await request;
+    } finally {
+      if (inFlightRequests.get(requestKey) === request) {
+        inFlightRequests.delete(requestKey);
+      }
+    }
+  }
+
+  async function fetchV1KanjiFallbackOrPrimary(
+    keyword,
+    generation,
+    primaryData,
+  ) {
+    try {
+      return await fetchV1KanjiFallback(keyword, generation);
+    } catch (error) {
+      console.warn(
+        `${script.name}: Could not fetch v1 kanji fallback for ${keyword}`,
+        error,
+      );
+      return primaryData;
     }
   }
 
@@ -1624,7 +1874,10 @@
       return remoteUrl;
     }
     if (mediaObjectUrls.has(remoteUrl)) {
-      return mediaObjectUrls.get(remoteUrl);
+      const objectUrl = mediaObjectUrls.get(remoteUrl);
+      mediaObjectUrls.delete(remoteUrl);
+      mediaObjectUrls.set(remoteUrl, objectUrl);
+      return objectUrl;
     }
     if (mediaRequests.has(remoteUrl)) {
       return mediaRequests.get(remoteUrl);
@@ -1657,7 +1910,16 @@
         }
         if (generation === cacheGeneration) {
           try {
-            await ikMediaCacheDB.put(remoteUrl, blob);
+            const limitMB =
+              Number(state.settings.general.dataFetching.mediaCacheLimitMB) ||
+              0;
+            if (limitMB > 0) {
+              await ikMediaCacheDB.put(
+                remoteUrl,
+                blob,
+                limitMB * 1024 * 1024,
+              );
+            }
           } catch (error) {
             console.warn(`${script.name}: Could not persist media`, error);
           }
@@ -1668,6 +1930,12 @@
       }
       const objectUrl = URL.createObjectURL(blob);
       mediaObjectUrls.set(remoteUrl, objectUrl);
+      if (mediaObjectUrls.size > mediaObjectUrlLimit) {
+        const oldestRemoteUrl = mediaObjectUrls.keys().next().value;
+        const oldestObjectUrl = mediaObjectUrls.get(oldestRemoteUrl);
+        mediaObjectUrls.delete(oldestRemoteUrl);
+        URL.revokeObjectURL(oldestObjectUrl);
+      }
       return objectUrl;
     })();
     mediaRequests.set(remoteUrl, request);
@@ -1690,6 +1958,7 @@
     if (!entry?.enabled) {
       return null;
     }
+    example.title = entry.title;
     keyword = keyword.replace('〜', '');
     const { filters } = state.settings;
     if (filters.exactMatch && !example.sentence.includes(keyword)) {
@@ -1713,12 +1982,12 @@
     return example;
   }
 
-  async function prefetchItem(keyword) {
+  async function prefetchItem(keyword, itemType) {
     if (!keyword) {
       return;
     }
     const version = state.settings.general.advanced.immersionKitAPIVersion;
-    const data = await fetchImmersionKitData(keyword);
+    const data = await fetchImmersionKitData(keyword, { itemType });
     const ids = await getDifficultySentenceIds(keyword, data);
     if (version !== state.settings.general.advanced.immersionKitAPIVersion) {
       return;
@@ -1734,13 +2003,14 @@
 
   function installActiveItemPrefetcher() {
     let lastKeyword = '';
-    const prefetch = (keyword) => {
-      if (!keyword || keyword === lastKeyword) {
+    const prefetch = (keyword, itemType) => {
+      const requestIdentity = `${itemType ?? ''}:${keyword}`;
+      if (!keyword || requestIdentity === lastKeyword) {
         return;
       }
-      lastKeyword = keyword;
-      void prefetchItem(keyword).catch((error) => {
-        if (lastKeyword === keyword) {
+      lastKeyword = requestIdentity;
+      void prefetchItem(keyword, itemType).catch((error) => {
+        if (lastKeyword === requestIdentity) {
           lastKeyword = '';
         }
         console.warn(`${script.name}: Active item prefetch failed`, error);
@@ -1752,18 +2022,24 @@
         const subject = event.detail?.subject;
         const type =
           subject?.type || subject?.object || event.detail?.subjectType;
+        const isKanji = ['Kanji', 'kanji'].includes(type);
+        const isSupportedType = [
+          'Vocabulary',
+          'KanaVocabulary',
+          'Kanji',
+          'vocabulary',
+          'kanaVocabulary',
+          'kana_vocabulary',
+          'kanji',
+        ].includes(type);
         if (
-          [
-            'Vocabulary',
-            'KanaVocabulary',
-            'Kanji',
-            'vocabulary',
-            'kanaVocabulary',
-            'kana_vocabulary',
-            'kanji',
-          ].includes(type)
+          isSupportedType &&
+          (!isKanji || state.settings.general.appearance.showOnKanji)
         ) {
-          prefetch(subject.characters || subject.data?.characters);
+          prefetch(
+            subject.characters || subject.data?.characters,
+            String(type ?? '').toLowerCase(),
+          );
         }
       },
       true,
@@ -1778,11 +2054,15 @@
       const read = () => {
         const container = header.closest('[data-subject-type]');
         const type = container?.dataset.subjectType;
+        const isKanji = type?.toLowerCase() === 'kanji';
         const radical =
           type?.toLowerCase() === 'radical' ||
           header.closest('.character-header--radical');
-        if (!radical) {
-          prefetch(header.textContent.trim());
+        if (
+          !radical &&
+          (!isKanji || state.settings.general.appearance.showOnKanji)
+        ) {
+          prefetch(header.textContent.trim(), String(type ?? '').toLowerCase());
         }
       };
       headerObserver = new MutationObserver(read);
@@ -1837,6 +2117,7 @@
         await fetchImmersionKitData(item.data.characters, {
           background: true,
           version,
+          itemType: item.object,
         });
       } catch (error) {
         console.warn(
@@ -1853,7 +2134,7 @@
       item.characters,
     );
     try {
-      await addContextSentences(item);
+      await addContextSentences(item.type);
     } catch (e) {
       throw Error(`Error while adding ${script.name} section: ${e.message}`, {
         cause: e,
@@ -1861,7 +2142,12 @@
     }
   }
 
-  function sortSentences(sentences, primarySorting, secondarySorting) {
+  function sortSentences(
+    sentences,
+    primarySorting,
+    secondarySorting,
+    preferredSources = '',
+  ) {
     const categoryCompare = (a, b) => a.category.localeCompare(b.category);
     const sourceCompare = (a, b) => a.title.localeCompare(b.title);
     const shortnessCompare = (a, b) => a.sentence.length - b.sentence.length;
@@ -1869,6 +2155,32 @@
     const positionCompare = (a, b) =>
       a.furiganaObject.getFirstKeywordIndex() -
       b.furiganaObject.getFirstKeywordIndex();
+    const matchSourceFragments = !Array.isArray(preferredSources);
+    const sourcePriorities = getPreferredSources(preferredSources).map(
+      (title) => title.toLowerCase(),
+    );
+    const getSourcePriority = (title) => {
+      const normalizedTitle = title.toLowerCase();
+      return sourcePriorities.findIndex(
+        (source) =>
+          normalizedTitle === source ||
+          (matchSourceFragments && normalizedTitle.includes(source)),
+      );
+    };
+    const preferredSourceCompare = (a, b) => {
+      const aPriority = getSourcePriority(a.title);
+      const bPriority = getSourcePriority(b.title);
+      if (aPriority === bPriority) {
+        return 0;
+      }
+      if (aPriority === -1) {
+        return 1;
+      }
+      if (bPriority === -1) {
+        return -1;
+      }
+      return aPriority - bPriority;
+    };
     const sort = (primaryOrder, a, b) => {
       if (primaryOrder !== 0) {
         return primaryOrder;
@@ -1903,6 +2215,9 @@
         break;
       case 'source':
         sentences.sort((a, b) => sort(sourceCompare(a, b), a, b));
+        break;
+      case 'preferredSources':
+        sentences.sort((a, b) => sort(preferredSourceCompare(a, b), a, b));
         break;
       case 'position':
         sentences.sort((a, b) => sort(positionCompare(a, b), a, b));
@@ -2010,12 +2325,12 @@
 
   // Called from Immersion Kit response and on settings save.
   // This function starts by calling fetchImmersionKitData() to get the data.
-  async function renderSentences() {
+  async function renderSentences(itemType = state.wkItemInfo.item?.type) {
     const generation = ++renderGeneration;
     const keyword = state.wkItemInfo.item.characters;
     let data, difficultyIds;
     try {
-      data = await fetchImmersionKitData(keyword);
+      data = await fetchImmersionKitData(keyword, { itemType });
       difficultyIds = await getDifficultySentenceIds(keyword, data);
     } catch (error) {
       console.warn(`${script.name}: Could not load sentences`, error);
@@ -2108,17 +2423,24 @@
       (failWhenHidden && debugList.size > 0)
     ) {
       const deckCountsAsJson = JSON.stringify(data.deck_count, undefined, '\t');
-      const preElement = Object.assign(document.createElement('pre'), {
-        innerHTML: `${sentencesToDisplay.length > 0 ? sentencesToDisplay.length : 'No'} sentences found for the selected filters (${exampleCount - sentencesToDisplay.length} are available but hidden; see below for details and entry counts).`,
-      });
+      const diagnosticLines = [
+        `${sentencesToDisplay.length > 0 ? sentencesToDisplay.length : 'No'} sentences found for the selected filters (${exampleCount - sentencesToDisplay.length} are available but hidden; see below for details and entry counts).`,
+      ];
       if (failWhenHidden) {
-        preElement.innerHTML += `<br><br>Currently hidden titles: {<br>\t${Array.from(
-          debugList,
-        )
-          .map(([title, count]) => `"${title}": ${count}`)
-          .join('<br>\t')}<br>}<br>`;
+        diagnosticLines.push(
+          '',
+          '',
+          `Currently hidden titles: {\n\t${Array.from(debugList)
+            .map(([title, count]) => `"${title}": ${count}`)
+            .join('\n\t')}\n}\n`,
+        );
       }
-      preElement.innerHTML += `<br>Complete deck count data: ${deckCountsAsJson}`;
+      diagnosticLines.push(
+        `Complete deck count data: ${deckCountsAsJson}`,
+      );
+      const preElement = Object.assign(document.createElement('pre'), {
+        textContent: diagnosticLines.join('\n'),
+      });
       elements.sentences.replaceChildren(preElement);
       return;
     }
@@ -2128,6 +2450,7 @@
       sentencesToDisplay,
       settings.sorting.primary,
       settings.sorting[script.secondarySortingKeyName],
+      settings.sorting.preferredSources,
     );
     const exampleLimit = Number(settings.general.appearance.exampleLimit);
     const remainingSentences =
@@ -2553,6 +2876,14 @@
     wkof.Menu.insert_script_link(config);
   }
 
+  function scheduleMenuInstall() {
+    clearTimeout(menuInstallTimer);
+    menuInstallTimer = setTimeout(() => {
+      menuInstallTimer = null;
+      void wkof.ready('Menu').then(installMenu);
+    }, 0);
+  }
+
   async function loadSettings() {
     try {
       return mergeSettings(await wkof.Settings.load(script.id, state.settings));
@@ -2618,6 +2949,10 @@
       onFetchOptionChanged('retryCount', dataFetching.retryCount),
       onFetchOptionChanged('retryDelay', dataFetching.retryDelay),
       onFetchOptionChanged('checkLastModified', dataFetching.checkLastModified),
+      onFetchOptionChanged(
+        'mediaCacheLimitMB',
+        dataFetching.mediaCacheLimitMB,
+      ),
       onAdvancedOptionChanged('debugging', advanced.debugging),
       onAdvancedOptionChanged('failWhenHidden', advanced.failWhenHidden),
       onAdvancedOptionChanged(
@@ -2666,6 +3001,7 @@
       sorting: {
         primary: primarySorting,
         [script.secondarySortingKeyName]: secondarySorting,
+        preferredSources,
       },
     } = state.settings;
     const {
@@ -2686,6 +3022,7 @@
       sorting: {
         primary: primarySortingNew,
         [script.secondarySortingKeyName]: secondarySortingNew,
+        preferredSources: preferredSourcesNew,
       },
     } = updatedSettings;
     for (const listKey of Object.keys(state.settings.filters.lists)) {
@@ -2715,7 +3052,11 @@
     } else if (
       exactMatch !== exactMatchNew ||
       primarySorting !== primarySortingNew ||
-      secondarySorting !== secondarySortingNew
+      secondarySorting !== secondarySortingNew ||
+      !arrayValuesEqual(
+        getPreferredSources(preferredSources),
+        getPreferredSources(preferredSourcesNew),
+      )
     ) {
       pending.renderSentences = true;
     }
@@ -2765,6 +3106,220 @@
   function openSettings(e) {
     e.stopPropagation();
     new wkof.Settings(state.settingsDialog).open();
+    renderPreferredSourcesSettings();
+  }
+
+  function getPreferredSources(preferredSources) {
+    const sources = Array.isArray(preferredSources)
+      ? preferredSources
+      : String(preferredSources ?? '').split(',');
+    return [
+      ...new Set(
+        sources
+          .filter((source) => typeof source === 'string')
+          .map((source) => source.trim())
+          .filter(Boolean),
+      ),
+    ];
+  }
+
+  function renderPreferredSourcesSettings() {
+    const container = document.getElementById(
+      `${script.id}-preferred-sources`,
+    );
+    if (!container) {
+      return;
+    }
+    const savedSources = state.settings.sorting.preferredSources;
+    const selectedSources = Array.isArray(savedSources)
+      ? getPreferredSources(savedSources)
+      : getPreferredSources(savedSources).flatMap((source) => {
+          const matches = [...state.content.allContent.keys()]
+            .filter((title) =>
+              title.toLowerCase().includes(source.toLowerCase()),
+            )
+            .sort((a, b) => a.localeCompare(b));
+          return matches.length > 0 ? matches : [source];
+        });
+    updateFrameworkPreferredSources(selectedSources);
+    const list = document.createElement('ol');
+    list.className = `${script.id}-preferred-source-list`;
+    const addSource = (title) => {
+      if (!title || selectedSources.includes(title)) {
+        return;
+      }
+      selectedSources.push(title);
+      renderItems();
+      updateFrameworkPreferredSources(selectedSources);
+    };
+    const renderItems = () => {
+      list.replaceChildren();
+      for (const title of selectedSources) {
+        const item = document.createElement('li');
+        item.className = `${script.id}-preferred-source`;
+        item.draggable = true;
+        item.dataset.sourceTitle = title;
+        const dragHandle = Object.assign(document.createElement('span'), {
+          className: `${script.id}-preferred-source-handle`,
+          textContent: '☰',
+          title: 'Drag to reorder',
+        });
+        dragHandle.setAttribute('aria-hidden', 'true');
+        const titleElement = Object.assign(document.createElement('span'), {
+          textContent: title,
+        });
+        const moveUp = Object.assign(document.createElement('button'), {
+          type: 'button',
+          textContent: '↑',
+          title: 'Move up',
+          disabled: selectedSources.indexOf(title) === 0,
+        });
+        moveUp.setAttribute('aria-label', `Move ${title} up`);
+        const moveDown = Object.assign(document.createElement('button'), {
+          type: 'button',
+          textContent: '↓',
+          title: 'Move down',
+          disabled: selectedSources.indexOf(title) === selectedSources.length - 1,
+        });
+        moveDown.setAttribute('aria-label', `Move ${title} down`);
+        const remove = Object.assign(document.createElement('button'), {
+          type: 'button',
+          textContent: 'Remove',
+        });
+        remove.setAttribute('aria-label', `Remove ${title}`);
+        moveUp.addEventListener('click', () => moveSource(title, -1));
+        moveDown.addEventListener('click', () => moveSource(title, 1));
+        remove.addEventListener('click', () => {
+          selectedSources.splice(selectedSources.indexOf(title), 1);
+          renderItems();
+          updateFrameworkPreferredSources(selectedSources);
+          const option = document.createElement('option');
+          option.value = title;
+          option.textContent = title;
+          sourceSelect.append(option);
+          Array.from(sourceSelect.options)
+            .sort((a, b) => a.textContent.localeCompare(b.textContent))
+            .forEach((sortedOption) => sourceSelect.append(sortedOption));
+          addButton.disabled = false;
+        });
+        item.append(dragHandle, titleElement, moveUp, moveDown, remove);
+        list.append(item);
+      }
+    };
+    const moveSource = (title, offset) => {
+      const index = selectedSources.indexOf(title);
+      const nextIndex = index + offset;
+      if (index < 0 || nextIndex < 0 || nextIndex >= selectedSources.length) {
+        return;
+      }
+      selectedSources.splice(index, 1);
+      selectedSources.splice(nextIndex, 0, title);
+      renderItems();
+      updateFrameworkPreferredSources(selectedSources);
+    };
+    let draggedItem = null;
+    list.addEventListener('dragstart', (event) => {
+      draggedItem = event.target.closest('li[data-source-title]');
+      if (!draggedItem) {
+        return;
+      }
+      event.dataTransfer.effectAllowed = 'move';
+      event.dataTransfer.setData('text/plain', draggedItem.dataset.sourceTitle);
+    });
+    list.addEventListener('dragover', (event) => {
+      if (draggedItem && event.target.closest('li[data-source-title]')) {
+        event.preventDefault();
+      }
+    });
+    list.addEventListener('drop', (event) => {
+      const target = event.target.closest('li[data-source-title]');
+      if (!draggedItem || !target || draggedItem === target) {
+        return;
+      }
+      event.preventDefault();
+      const draggedTitle = draggedItem.dataset.sourceTitle;
+      const targetTitle = target.dataset.sourceTitle;
+      const insertAfter =
+        event.clientY >
+        target.getBoundingClientRect().top + target.offsetHeight / 2;
+      selectedSources.splice(
+        0,
+        selectedSources.length,
+        ...movePreferredSourceInOrder(
+          selectedSources,
+          draggedTitle,
+          targetTitle,
+          insertAfter,
+        ),
+      );
+      draggedItem = null;
+      renderItems();
+      updateFrameworkPreferredSources(selectedSources);
+    });
+    list.addEventListener('dragend', () => {
+      draggedItem = null;
+    });
+
+    const sourceSelect = document.createElement('select');
+    sourceSelect.setAttribute('aria-label', 'Choose a source to prioritize');
+    const sourceTitles = [...state.content.allContent.keys()].sort((a, b) =>
+      a.localeCompare(b),
+    );
+    for (const title of sourceTitles) {
+      if (selectedSources.includes(title)) {
+        continue;
+      }
+      const option = document.createElement('option');
+      option.value = title;
+      option.textContent = title;
+      sourceSelect.append(option);
+    }
+    const addButton = Object.assign(document.createElement('button'), {
+      type: 'button',
+      textContent: 'Add source',
+      disabled: sourceSelect.options.length === 0,
+    });
+    addButton.addEventListener('click', () => {
+      addSource(sourceSelect.value);
+      const selectedTitle = sourceSelect.value;
+      const option = Array.from(sourceSelect.options).find(
+        ({ value }) => value === selectedTitle,
+      );
+      option?.remove();
+      addButton.disabled = sourceSelect.options.length === 0;
+    });
+    renderItems();
+    container.replaceChildren(sourceSelect, addButton, list);
+  }
+
+  function updateFrameworkPreferredSources(preferredSources) {
+    const frameworkSettings = wkof.settings?.[script.id];
+    if (!frameworkSettings) {
+      throw new Error('WKOF settings are unavailable while editing source priorities');
+    }
+    frameworkSettings.sorting.preferredSources = [...preferredSources];
+  }
+
+  function movePreferredSourceInOrder(
+    preferredSources,
+    draggedTitle,
+    targetTitle,
+    insertAfter,
+  ) {
+    const sources = [...preferredSources];
+    const draggedIndex = sources.indexOf(draggedTitle);
+    const targetIndex = sources.indexOf(targetTitle);
+    if (
+      draggedIndex === -1 ||
+      targetIndex === -1 ||
+      draggedIndex === targetIndex
+    ) {
+      return sources;
+    }
+    sources.splice(draggedIndex, 1);
+    const adjustedTargetIndex = sources.indexOf(targetTitle);
+    sources.splice(adjustedTargetIndex + Number(insertAfter), 0, draggedTitle);
+    return sources;
   }
 
   async function onAppearanceOptionChanged(name, value) {
@@ -2870,11 +3425,18 @@
   }
 
   async function onFetchOptionChanged(name, value) {
-    if (value === state.settings.general.dataFetching[name]) {
+    let normalizedValue = value;
+    if (name === 'mediaCacheLimitMB') {
+      normalizedValue = Number(value);
+      if (!Number.isFinite(normalizedValue) || normalizedValue < 0) {
+        throw new Error('Media cache limit must be a non-negative number');
+      }
+    }
+    if (normalizedValue === state.settings.general.dataFetching[name]) {
       return;
     }
     let prevRetryCount = state.settings.general.dataFetching.retryCount;
-    state.settings.general.dataFetching[name] = value;
+    state.settings.general.dataFetching[name] = normalizedValue;
     switch (name) {
       case 'retryCount':
         // TODO: Possibly make this not affect the fetch count when the dialog was canceled instead of saved
@@ -2894,6 +3456,9 @@
         break;
       case 'retryDelay':
       case 'checkLastModified':
+        break;
+      case 'mediaCacheLimitMB':
+        await ikMediaCacheDB.trimToLimit(normalizedValue * 1024 * 1024);
         break;
     }
   }
@@ -3045,6 +3610,10 @@
             #${script.id} > button { display: block; margin: 0.5em auto 1em; padding: 0.5em 1em; border: 1px solid #555; border-radius: 4px; background-color: #555; color: white; font: inherit; cursor: pointer; transition: background-color 0.1s; }
             #${script.id} > button:hover { background-color: #444; }
             #${script.id} > button:disabled { cursor: wait; opacity: 0.7; }
+            #${script.id}_dialog .${script.id}-preferred-source-list { list-style: none; margin: 0.5em 0; padding: 0; }
+            #${script.id}_dialog .${script.id}-preferred-source { display: flex; align-items: center; gap: 0.5em; margin: 0.25em 0; padding: 0.35em; border: 1px solid #aaa; border-radius: 4px; }
+            #${script.id}_dialog .${script.id}-preferred-source-handle { cursor: grab; user-select: none; }
+            #${script.id}_dialog .${script.id}-preferred-source > span:nth-child(2) { flex: 1; }
             .${script.id}-settings-btn { font-size: 14px; cursor: pointer; vertical-align: middle; margin-left: 10px; }
             #${script.id}-container { border: none; font-size: 100%; }
             #${script.id} pre { white-space: pre-wrap; white-space: -moz-pre-wrap; white-space: -pre-wrap; white-space: -o-pre-wrap; word-wrap: break-word; }
