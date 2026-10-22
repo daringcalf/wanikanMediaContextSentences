@@ -145,7 +145,8 @@ function harness({ fetch = async () => { throw new Error('Unexpected network req
     'getMediaBlobUrl', 'renderSentences', 'prefetchItem', 'installActiveItemPrefetcher',
     'startBackgroundPrewarmer', 'onFlushCachedDataClicked', 'migrateSettingsVersion',
     'onAppearanceOptionChanged', 'onPlaybackOptionChanged', 'onFetchOptionChanged',
-    'onAdvancedOptionChanged', 'onSettingsSaved', 'updateDesiredShows', 'prepareExample', 'Furigana',
+    'onAdvancedOptionChanged', 'onSettingsSaved', 'onSettingsClosed', 'loadSettings',
+    'updateDesiredShows', 'prepareExample', 'Furigana',
     'updateKeyMapForTitles', 'addMissingEntriesToContent', 'sortSentences',
     'movePreferredSourceInOrder', 'renderPreferredSourcesSettings',
     'getMediaCacheTrimPlan',
@@ -641,6 +642,7 @@ test('rendering sorts before limiting, creates only visible candidates, and pres
   const before = structuredClone(corpus);
   h.setCachedData('v2:猫', { data: corpus });
   h.state.settings.general.appearance.exampleLimit = 3;
+  h.state.settings.general.dataFetching.prefetchCount = 0;
   h.state.settings.sorting.primary = 'shortness';
   await h.renderSentences();
   assert.equal(h.state.elements.sentences.children.length, 3);
@@ -905,23 +907,145 @@ test('Furigana escapes third-party text while preserving keyword markup', () => 
   assert.ok(!expressionHtml.includes('<img'));
 });
 
-test('active event prefetches JSON and only the two shortest matching audio clips', async () => {
+test('active event prefetches images and audio for the first five sorted sentences', async () => {
   const urls = [];
+  const corpus = data(Array.from({ length: 8 }, (_, i) => example(`${i}`, '猫'.repeat(i + 1))));
+  const before = structuredClone(corpus);
   const h = harness({ fetch: async (url) => {
     urls.push(url);
     return url.includes('/search')
-      ? response(data([example('long', '猫ですよ'), example('short', '猫'), example('mid', '猫だ')]))
+      ? response(corpus)
       : response({});
   } });
+  assert.equal(h.state.settings.general.dataFetching.prefetchCount, 5);
+  h.state.settings.sorting.primary = 'longness';
   h.installActiveItemPrefetcher();
   h.windowEvents.willShowNextQuestion({ detail: { subject: { type: 'Vocabulary', characters: '猫' } } });
   await tick();
   await tick();
-  assert.equal(urls.length, 3);
-  assert.ok(urls.some((url) => url.endsWith('/short.mp3')));
-  assert.ok(urls.some((url) => url.endsWith('/mid.mp3')));
-  assert.ok(!urls.some((url) => url.endsWith('/long.mp3')));
+  assert.equal(urls.length, 11);
+  assert.deepEqual(urls.slice(1).map((url) => url.split('/').at(-1)), [
+    '7.jpg', '7.mp3', '6.jpg', '6.mp3', '5.jpg', '5.mp3',
+    '4.jpg', '4.mp3', '3.jpg', '3.mp3',
+  ]);
+  assert.deepEqual(corpus, before);
   assert.equal(h.state.elements.sentences.textContent, '');
+  h.windowEvents.willShowNextQuestion({ detail: { subject: { type: 'Vocabulary', characters: '猫' } } });
+  await tick();
+  assert.equal(urls.length, 11);
+});
+
+test('prefetch and rendering share source priorities, secondary position sorting, and filters', async () => {
+  const urls = [];
+  const h = harness({ fetch: async (url) => { urls.push(url); return response({}); } });
+  h.state.settings.general.dataFetching.prefetchCount = 2;
+  h.state.settings.sorting.primary = 'preferredSources';
+  h.state.settings.sorting.secondary = 'position';
+  h.state.settings.sorting.preferredSources = ['Shirokuma Cafe'];
+  h.state.settings.filters.exactMatch = true;
+  h.state.content.allContent.get('Angel Beats!').enabled = false;
+  h.setCachedData('v2:猫', { data: data([
+    example('other', '猫'),
+    { ...example('later', 'あ猫'), title: 'Shirokuma Cafe' },
+    { ...example('first', '猫です'), title: 'Shirokuma Cafe' },
+    { ...example('disabled', '猫'), title: 'Angel Beats!' },
+    { ...example('filtered', '犬'), title: 'Shirokuma Cafe' },
+  ]) });
+
+  await h.prefetchItem('猫', 'vocabulary');
+  assert.deepEqual(urls.map((url) => url.split('/').at(-1)), [
+    'first.jpg', 'first.mp3', 'later.jpg', 'later.mp3',
+  ]);
+  await h.renderSentences();
+  await tick();
+  assert.equal(urls.length, 4);
+  assert.deepEqual(
+    h.state.elements.sentences.children.slice(0, 2).map(
+      (el) => el.children[1].children[0].children[0].id,
+    ),
+    ['audio-button-first', 'audio-button-later'],
+  );
+});
+
+test('prefetch applies difficulty filters before selecting media', async () => {
+  const urls = [];
+  const h = harness({ fetch: async (url) => {
+    urls.push(url);
+    return url.includes('/search') ? response(data([example('allowed')])) : response({});
+  } });
+  h.state.settings.filters.jlptLevel = 5;
+  h.setCachedData('v2:猫', { data: data([example('excluded'), example('allowed')]) });
+  await h.prefetchItem('猫', 'vocabulary');
+  assert.equal(urls.length, 3);
+  assert.ok(urls[0].includes('&jlpt=5'));
+  assert.ok(urls[1].endsWith('/allowed.jpg'));
+  assert.ok(urls[2].endsWith('/allowed.mp3'));
+});
+
+test('rendering starts prefetch without review events and does not wait for media', async () => {
+  const urls = [], pending = deferred();
+  const h = harness({ fetch: (url) => { urls.push(url); return pending.promise; } });
+  h.setCachedData('v2:猫', {
+    data: data(Array.from({ length: 7 }, (_, i) => example(`${i}`))),
+  });
+  await h.renderSentences();
+  assert.equal(h.state.elements.sentences.children.length, 7);
+  assert.deepEqual(urls.map((url) => url.split('/').at(-1)), [
+    '0.jpg', '0.mp3', '1.jpg', '1.mp3', '2.jpg', '2.mp3',
+    '3.jpg', '3.mp3', '4.jpg', '4.mp3',
+  ]);
+  pending.resolve(response({}));
+  await tick();
+  await h.state.elements.sentences.children[0].children[1].children[0].children[0].click();
+  assert.equal(urls.length, 10);
+});
+
+test('prefetch count setting updates the active item, supports zero, and rejects invalid counts', async () => {
+  const urls = [];
+  const h = harness({ fetch: async (url) => { urls.push(url); return response({}); } });
+  h.setCachedData('v2:猫', { data: data([
+    example('first'), example('second'), example('third'),
+  ]) });
+  const option = h.state.settingsDialog.content.general.content
+    .immersionKitDataFetchingOptions.content.prefetchCount;
+  assert.equal(option.default, 5);
+  assert.equal(option.path, '@general.dataFetching.prefetchCount');
+  assert.equal(option.min, 0);
+  assert.equal(option.step, 1);
+
+  await h.onFetchOptionChanged('prefetchCount', '1');
+  assert.equal(h.state.settings.general.dataFetching.prefetchCount, 1);
+  assert.equal(urls.length, 2);
+  const savedSettings = structuredClone(h.state.settings);
+  await h.onFetchOptionChanged('prefetchCount', 2);
+  assert.equal(urls.length, 4);
+  await h.onSettingsClosed(savedSettings);
+  assert.equal(h.state.settings.general.dataFetching.prefetchCount, 1);
+
+  await h.onFetchOptionChanged('prefetchCount', 0);
+  await h.prefetchItem('uncached', 'vocabulary');
+  await h.renderSentences();
+  await tick();
+  assert.equal(urls.length, 4);
+  for (const invalid of [-1, 1.5, 'bad', Infinity, NaN]) {
+    await assert.rejects(
+      h.onFetchOptionChanged('prefetchCount', invalid),
+      /Prefetch count must be a non-negative integer/,
+    );
+    assert.equal(h.state.settings.general.dataFetching.prefetchCount, 0);
+  }
+});
+
+test('loading saved settings retains a configured prefetch count and defaults older settings to five', async () => {
+  for (const count of [undefined, 0, 3, 9]) {
+    const h = harness();
+    const settings = structuredClone(h.state.settings);
+    if (count === undefined) delete settings.general.dataFetching.prefetchCount;
+    else settings.general.dataFetching.prefetchCount = count;
+    h.framework.Settings = { load: async () => settings };
+    await h.loadSettings();
+    assert.equal(h.state.settings.general.dataFetching.prefetchCount, count ?? 5);
+  }
 });
 
 test('active event prefetch respects showOnKanji while preserving vocabulary prefetch', async () => {
@@ -1234,6 +1358,7 @@ test('mutation fallback warms a newly mounted character header without waiting f
 test('audio buttons load cached Blobs and preserve playback settings, pause and resume', async () => {
   let calls = 0;
   const h = harness({ fetch: async () => { calls++; return response({}); } });
+  h.state.settings.general.dataFetching.prefetchCount = 0;
   h.setCachedData('v2:猫', { data: data() });
   h.state.settings.general.playback.playbackRate = 60;
   h.state.settings.general.playback.playbackVolume = 40;
@@ -1264,6 +1389,7 @@ test('audio indicates loading immediately, ignores duplicate clicks and tracks b
   const pending = deferred();
   let calls = 0;
   const h = harness({ fetch: () => { calls++; return pending.promise; } });
+  h.state.settings.general.dataFetching.prefetchCount = 0;
   h.setCachedData('v2:猫', { data: data() });
   await h.renderSentences();
   const button = h.state.elements.sentences.children[0].children[1].children[0].children[0];

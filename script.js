@@ -3,19 +3,16 @@
 // @description  Formerly named "Wanikani Anime Sentences 2". Adds example sentences from anime, dramas, games, literature, and news for vocabulary from https://www.immersionkit.com.
 // @version      2026-10-19
 // @author       Daring Cλlf
-// @namespace    https://greasyfork.org/en/users/11878
+// @namespace    https://greasyfork.org/en/users/982721-daringcalf
 // @match        https://www.wanikani.com/*
 // @match        https://preview.wanikani.com/*
 // @require      https://greasyfork.org/scripts/430565-wanikani-item-info-injector/code/WaniKani%20Item%20Info%20Injector.user.js?version=1951553
 // @copyright    2021+, Paul Connolly
-// @copyright    2024-2025, Brian Shenk
-// @copyright    2026, Inserio
+// @copyright    2024-2025, Brian Shenk, Inserio
 // @license      MIT; http://opensource.org/licenses/MIT
 // @run-at       document-body
 // @grant        none
 // ==/UserScript==
-/* jshint esversion: 11, curly: true */
-/* eslint curly: ["error", "all"] */
 
 // noinspection CssUnusedSymbol,CssInvalidPropertyValue,CssUnresolvedCustomProperty,JSUnusedGlobalSymbols,JSNonASCIINames
 /* global wkItemInfo */
@@ -559,6 +556,8 @@
           checkLastModified: false,
           // Maximum persistent media cache size in MiB; 0 disables persistent media caching.
           mediaCacheLimitMB: 500,
+          // Prefetch images and audio for the first N filtered, sorted sentences; 0 disables prefetching.
+          prefetchCount: 5,
         },
         // Advanced Options
         advanced: {
@@ -726,12 +725,24 @@
                     on_change: onFetchOptionChanged,
                     path: '@general.dataFetching.retryDelay',
                   },
+                  prefetchCount: {
+                    type: 'number',
+                    label: 'Prefetch Sentence Count',
+                    step: 1,
+                    min: 0,
+                    default: state.settings.general.dataFetching.prefetchCount,
+                    hover_tip:
+                      'Prefetch images and audio for the first N sentences in your selected sort order, after filtering. Defaults to 5. Set to 0 to disable media prefetching; remaining media loads on demand.',
+                    on_change: onFetchOptionChanged,
+                    path: '@general.dataFetching.prefetchCount',
+                  },
                   mediaCacheLimitMB: {
                     type: 'number',
                     label: 'Media Cache Limit (MB)',
                     step: 50,
                     min: 0,
-                    default: state.settings.general.dataFetching.mediaCacheLimitMB,
+                    default:
+                      state.settings.general.dataFetching.mediaCacheLimitMB,
                     hover_tip:
                       'Maximum disk space used for cached images and audio. Oldest media is removed when the limit is exceeded. Set to 0 to disable persistent media caching.',
                     on_change: onFetchOptionChanged,
@@ -1157,7 +1168,10 @@
         state.settings.general.dataFetching.mediaCacheLimitMB * 1024 * 1024,
       );
     } catch (error) {
-      console.warn(`${script.name}: Could not enforce media cache limit`, error);
+      console.warn(
+        `${script.name}: Could not enforce media cache limit`,
+        error,
+      );
     }
     window.mediaContextSentences = state;
     setWaniKaniItemInfoListener();
@@ -1406,9 +1420,7 @@
     let totalBytes = retainedRecords.reduce(
       (total, record) =>
         total + (Number(record.size ?? record.blob?.size) || 0),
-      addRecord
-        ? Number(addRecord.size ?? addRecord.blob?.size) || 0
-        : 0,
+      addRecord ? Number(addRecord.size ?? addRecord.blob?.size) || 0 : 0,
     );
     const oldestFirst = [...retainedRecords].sort(
       (a, b) => (Number(a.timestamp) || 0) - (Number(b.timestamp) || 0),
@@ -1914,11 +1926,7 @@
               Number(state.settings.general.dataFetching.mediaCacheLimitMB) ||
               0;
             if (limitMB > 0) {
-              await ikMediaCacheDB.put(
-                remoteUrl,
-                blob,
-                limitMB * 1024 * 1024,
-              );
+              await ikMediaCacheDB.put(remoteUrl, blob, limitMB * 1024 * 1024);
             }
           } catch (error) {
             console.warn(`${script.name}: Could not persist media`, error);
@@ -1979,11 +1987,36 @@
     if (!example.sound_url && example.sound) {
       example.sound_url = `${baseUrl}${example.sound}`;
     }
+    const directionalFormattingCharsRegex =
+      /[\u202A-\u202E\u2066-\u2069\uE4C6]/g;
+    example.sentence = example.sentence.replace(
+      directionalFormattingCharsRegex,
+      '',
+    );
+    example.sentence_with_furigana = example.sentence_with_furigana.replace(
+      directionalFormattingCharsRegex,
+      '',
+    );
+    example.furiganaObject = new Furigana(
+      example.sentence,
+      example.sentence_with_furigana,
+    );
+    setKeywordRegexForItem(example, keyword);
     return example;
   }
 
+  async function prefetchSentenceMedia(examples) {
+    const count = state.settings.general.dataFetching.prefetchCount;
+    await Promise.all(
+      examples.slice(0, count).flatMap((example) => [
+        getMediaBlobUrl(example.image_url),
+        getMediaBlobUrl(example.sound_url),
+      ]),
+    );
+  }
+
   async function prefetchItem(keyword, itemType) {
-    if (!keyword) {
+    if (!keyword || state.settings.general.dataFetching.prefetchCount === 0) {
       return;
     }
     const version = state.settings.general.advanced.immersionKitAPIVersion;
@@ -1995,10 +2028,14 @@
     const examples = data.examples
       .map((example) => prepareExample(example, keyword, ids))
       .filter(Boolean);
-    examples.sort((a, b) => a.sentence.length - b.sentence.length);
-    await Promise.all(
-      examples.slice(0, 2).map((example) => getMediaBlobUrl(example.sound_url)),
+    const { sorting } = state.settings;
+    sortSentences(
+      examples,
+      sorting.primary,
+      sorting[script.secondarySortingKeyName],
+      sorting.preferredSources,
     );
+    await prefetchSentenceMedia(examples);
   }
 
   function installActiveItemPrefetcher() {
@@ -2394,22 +2431,6 @@
         }
         continue;
       }
-      // Strip directional formatting and other non-displaying characters from sentences (...how they got there in the first place, who knows...)
-      const directionalFormattingCharsRegex =
-        /[\u202A-\u202E\u2066-\u2069\uE4C6]/g;
-      example.sentence = example.sentence.replace(
-        directionalFormattingCharsRegex,
-        '',
-      );
-      example.sentence_with_furigana = example.sentence_with_furigana.replace(
-        directionalFormattingCharsRegex,
-        '',
-      );
-      example.furiganaObject = new Furigana(
-        example.sentence,
-        example.sentence_with_furigana,
-      );
-      setKeywordRegexForItem(example, keyword.replace('〜', ''));
       sentencesToDisplay.push(example);
     }
     if (errorList.length > 0) {
@@ -2435,9 +2456,7 @@
             .join('\n\t')}\n}\n`,
         );
       }
-      diagnosticLines.push(
-        `Complete deck count data: ${deckCountsAsJson}`,
-      );
+      diagnosticLines.push(`Complete deck count data: ${deckCountsAsJson}`);
       const preElement = Object.assign(document.createElement('pre'), {
         textContent: diagnosticLines.join('\n'),
       });
@@ -2451,6 +2470,9 @@
       settings.sorting.primary,
       settings.sorting[script.secondarySortingKeyName],
       settings.sorting.preferredSources,
+    );
+    void prefetchSentenceMedia(sentencesToDisplay).catch((error) =>
+      console.warn(`${script.name}: Sentence media prefetch failed`, error),
     );
     const exampleLimit = Number(settings.general.appearance.exampleLimit);
     const remainingSentences =
@@ -2897,7 +2919,10 @@
   // Merges the given settings into the state.settings object, using a deep copy and Object.assign() to avoid updating the state.settings object byref.
   // Returns the updated state.settings object
   function mergeSettings(settings) {
-    return Object.assign(state.settings, window.structuredClone(settings));
+    const mergedSettings = window.structuredClone(settings);
+    mergedSettings.general.dataFetching.prefetchCount ??=
+      state.settings.general.dataFetching.prefetchCount;
+    return Object.assign(state.settings, mergedSettings);
   }
 
   // Deletes pre-4.0.0 settings; date-versioned releases already use the newer format.
@@ -2949,10 +2974,8 @@
       onFetchOptionChanged('retryCount', dataFetching.retryCount),
       onFetchOptionChanged('retryDelay', dataFetching.retryDelay),
       onFetchOptionChanged('checkLastModified', dataFetching.checkLastModified),
-      onFetchOptionChanged(
-        'mediaCacheLimitMB',
-        dataFetching.mediaCacheLimitMB,
-      ),
+      onFetchOptionChanged('mediaCacheLimitMB', dataFetching.mediaCacheLimitMB),
+      onFetchOptionChanged('prefetchCount', dataFetching.prefetchCount),
       onAdvancedOptionChanged('debugging', advanced.debugging),
       onAdvancedOptionChanged('failWhenHidden', advanced.failWhenHidden),
       onAdvancedOptionChanged(
@@ -2965,6 +2988,7 @@
   // Called when the user clicks the Save button on the Settings dialog.
   async function onSettingsSaved(updatedSettings) {
     const { pending } = state;
+    const prefetchCount = state.settings.general.dataFetching.prefetchCount;
     const {
       filters: {
         exactMatch,
@@ -3037,6 +3061,9 @@
       }
     }
     mergeSettings(updatedSettings);
+    if (prefetchCount !== state.settings.general.dataFetching.prefetchCount) {
+      pending.renderSentences = true;
+    }
 
     // if (showOnKanji !== showOnKanjiNew) setWaniKaniItemInfoListener(showOnKanjiNew);
     if (
@@ -3124,9 +3151,7 @@
   }
 
   function renderPreferredSourcesSettings() {
-    const container = document.getElementById(
-      `${script.id}-preferred-sources`,
-    );
+    const container = document.getElementById(`${script.id}-preferred-sources`);
     if (!container) {
       return;
     }
@@ -3179,7 +3204,8 @@
           type: 'button',
           textContent: '↓',
           title: 'Move down',
-          disabled: selectedSources.indexOf(title) === selectedSources.length - 1,
+          disabled:
+            selectedSources.indexOf(title) === selectedSources.length - 1,
         });
         moveDown.setAttribute('aria-label', `Move ${title} down`);
         const remove = Object.assign(document.createElement('button'), {
@@ -3295,7 +3321,9 @@
   function updateFrameworkPreferredSources(preferredSources) {
     const frameworkSettings = wkof.settings?.[script.id];
     if (!frameworkSettings) {
-      throw new Error('WKOF settings are unavailable while editing source priorities');
+      throw new Error(
+        'WKOF settings are unavailable while editing source priorities',
+      );
     }
     frameworkSettings.sorting.preferredSources = [...preferredSources];
   }
@@ -3432,6 +3460,12 @@
         throw new Error('Media cache limit must be a non-negative number');
       }
     }
+    if (name === 'prefetchCount') {
+      normalizedValue = Number(value);
+      if (!Number.isInteger(normalizedValue) || normalizedValue < 0) {
+        throw new Error('Prefetch count must be a non-negative integer');
+      }
+    }
     if (normalizedValue === state.settings.general.dataFetching[name]) {
       return;
     }
@@ -3459,6 +3493,14 @@
         break;
       case 'mediaCacheLimitMB':
         await ikMediaCacheDB.trimToLimit(normalizedValue * 1024 * 1024);
+        break;
+      case 'prefetchCount':
+        if (state.wkItemInfo.item?.characters) {
+          await prefetchItem(
+            state.wkItemInfo.item.characters,
+            state.wkItemInfo.item.type,
+          );
+        }
         break;
     }
   }
@@ -3685,9 +3727,7 @@
       if (match.index === undefined) {
         continue;
       }
-      html += escapeHtml(
-        this.expression.substring(nextIndex, match.index),
-      );
+      html += escapeHtml(this.expression.substring(nextIndex, match.index));
       html += `<${this.keywordTag}>${escapeHtml(match[0])}</${this.keywordTag}>`;
       nextIndex = match.index + match[0].length;
     }
@@ -3766,7 +3806,9 @@
         if (markStart < textIndex || markStart >= markEnd) {
           continue;
         }
-        matchingSection += escapeHtml(expression.substring(textIndex, markStart));
+        matchingSection += escapeHtml(
+          expression.substring(textIndex, markStart),
+        );
         matchingSection += `<${this.keywordTag}>${escapeHtml(expression.substring(markStart, markEnd))}</${this.keywordTag}>`;
         textIndex = markEnd;
       }
